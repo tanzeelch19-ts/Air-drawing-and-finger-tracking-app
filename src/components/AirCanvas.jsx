@@ -587,7 +587,7 @@ export function AirCanvas() {
           width={WIDTH}
           height={HEIGHT}
           style={{ opacity: ink ? 1 : 0 }}
-          className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 [filter:drop-shadow(0_0_6px_rgba(255,255,255,0.45))]"
+          className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 filter-[drop-shadow(0_0_6px_rgba(255,255,255,0.45))]"
         />
 
         {/* Hologram skeleton */}
