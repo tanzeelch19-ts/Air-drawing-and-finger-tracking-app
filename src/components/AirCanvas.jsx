@@ -1,0 +1,699 @@
+import { useEffect, useRef, useState } from 'react';
+import { useHandTracker } from '@/hooks/useHandTracker';
+import { useStrokes } from '@/hooks/useStrokes';
+import { useRecorder } from '@/hooks/useRecorder';
+import { createHandReader, pinchRatio, pointsFor } from '@/lib/hand';
+import { OneEuroFilter } from '@/lib/oneEuro';
+import { createGestureStabilizer } from '@/lib/stabilizer';
+import { drawPiece, drawTail, renderAll, IDENTITY_VIEW, WIDTH, HEIGHT } from '@/lib/strokes';
+import { recognizeShape } from '@/lib/shapes';
+import { drawSkeleton } from '@/lib/skeleton';
+import { MAX_ZOOM, panTo, screenToWorld, zoomAbout } from '@/lib/view';
+import { composeFrame } from '@/lib/export';
+import { downloadBlob, stamp } from '@/lib/download';
+import { FILTERS, videoFilter } from '@/lib/filters';
+import { PALETTE, RAINBOW, RAINBOW_GRADIENT } from '@/lib/colors';
+import { DEFAULT_SIZE, SYMMETRIES, eraserSize, sizeFromPinch } from '@/lib/brush';
+import { Toolbar } from './Toolbar';
+import { FilterBar } from './FilterBar';
+import { ModePanel } from './ModePanel';
+import { ZoomPanel } from './ZoomPanel';
+import { SymmetryGuides } from './SymmetryGuides';
+
+// ---------- Tuning: yahan se behtari kar sakte hain ----------
+const FILTER = { minCutoff: 1.0, beta: 10 }; // ungli ke point ke liye (kam minCutoff = zyada smooth)
+const SKELETON_FILTER = { minCutoff: 2.0, beta: 12 }; // skeleton ke 21 points ke liye
+const PINCH_FILTER = { minCutoff: 1.2, beta: 6 }; // pinch ke faasle ke liye
+const ENTER_FRAMES = 3; // kisi gesture mein jane ke liye itne frames
+const EXIT_FRAMES = { draw: 6, double: 6, erase: 5, size: 4 }; // gesture se nikalne ke liye frames
+const LINK = ['draw', 'double']; // ye dono aapas mein jaldi badalte hain
+const MAX_MISSED = 8; // haath itne frames gum ho to bhi line nahi tootti
+const DWELL_MS = 700; // button dabane ke liye rukne ka time
+const MIN_STEP = 3; // line mein naya point tab jab ungli itne px hile
+const SIZE_HOLD_FRAMES = 6; // pinch itni der ruke to size lock hoga
+const SIZE_TOLERANCE = 1.5; // "ruka hua" ka matlab: size itna hi hila
+const LOCK_MS = 500; // pinch chhorne ke baad itni der draw/erase band
+const NO_HOVER = { id: null, progress: 0 };
+
+const SHAPE_LABEL = {
+  line: 'Seedhi line',
+  circle: 'Circle',
+  ellipse: 'Ellipse',
+  triangle: 'Triangle',
+  square: 'Square',
+  rectangle: 'Rectangle',
+  quad: 'Chaar kone',
+};
+
+// Har point ka apna smooth filter (x aur y alag).
+const makePointer = (config = FILTER) => ({
+  x: new OneEuroFilter(config),
+  y: new OneEuroFilter(config),
+});
+const resetPointer = (p) => {
+  p.x.reset();
+  p.y.reset();
+};
+
+// Draw aur double mein ungliyon ka naam bhi gesture ke saath judta hai ("draw|2" = sirf ring ungli),
+// taake ungli badalne par nayi line shuru ho.
+const gestureKey = ({ gesture, fingers }) =>
+  gesture === 'draw' || gesture === 'double' ? `${gesture}|${fingers.join(',')}` : gesture;
+
+// Ungli kisi UI (toolbar, panels ya filter bar) ke upar hai?
+function isOverUi(stage, cx, cy) {
+  return [...stage.querySelectorAll('[data-ui]')].some((el) => {
+    const r = el.getBoundingClientRect();
+    return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+  });
+}
+
+export function AirCanvas() {
+  const stageRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null); // drawing
+  const skelRef = useRef(null); // hand skeleton
+  const cursorEls = useRef([null, null]); // do cursors: har ungli ke liye ek
+
+  const store = useStrokes();
+  const [tools] = useState(() => ({
+    reader: createHandReader(),
+    pointers: [makePointer(), makePointer()],
+    skeleton: Array.from({ length: 21 }, () => makePointer(SKELETON_FILTER)),
+    pinch: new OneEuroFilter(PINCH_FILTER),
+    stabilizer: createGestureStabilizer({ enter: ENTER_FRAMES, exit: EXIT_FRAMES, link: LINK }),
+  }));
+
+  // Ye values har frame ke handler ko turant chahiye, is liye ref mein bhi rakhte hain.
+  const colorRef = useRef(PALETTE[0]);
+  const sizeRef = useRef(DEFAULT_SIZE);
+  const symRef = useRef(SYMMETRIES[0]);
+  const keyRef = useRef('none'); // poora gesture key (ungliyon ke saath)
+  const modeRef = useRef('none'); // sirf gesture ka naam
+  const hueRef = useRef(0);
+  const liveSize = useRef(DEFAULT_SIZE);
+  const sizeHold = useRef({ value: -1, count: 0 });
+  const lockUntil = useRef(0);
+  const dwell = useRef({ id: null, start: 0, fired: false });
+  const lastHand = useRef(null); // pichla haath (gum hone par kaam aata hai)
+  const missed = useRef(0); // kitne frames se haath nahi mila
+  const viewRef = useRef(IDENTITY_VIEW); // zoom
+  const replayFrame = useRef(0);
+  const toastTimer = useRef(0);
+  const skeletonRef = useRef(true);
+  const inkRef = useRef(true); // Rang On: drawing dikhe aur chale
+  const shapesRef = useRef(false);
+
+  const [color, setColor] = useState(PALETTE[0]);
+  const [size, setSize] = useState(DEFAULT_SIZE);
+  const [symmetry, setSymmetry] = useState(SYMMETRIES[0]);
+  const [filter, setFilter] = useState('normal');
+  const [mode, setMode] = useState('none');
+  const [hover, setHover] = useState(NO_HOVER);
+  const [view, setView] = useState(IDENTITY_VIEW);
+  const [skeleton, setSkeleton] = useState(true);
+  const [ink, setInk] = useState(true);
+  const [shapes, setShapes] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  const recorder = useRecorder((ctx) =>
+    composeFrame(ctx, {
+      video: videoRef.current,
+      strokes: canvasRef.current,
+      overlay: skelRef.current,
+      withVideo: true,
+      showStrokes: ink,
+      filter: videoFilter(filter),
+    }),
+  );
+
+  const getCtx = () => canvasRef.current?.getContext('2d') ?? null;
+
+  // ctx par zoom laga kar draw karta hai.
+  function inView(ctx, draw) {
+    const v = viewRef.current;
+    ctx.save();
+    ctx.setTransform(v.scale, 0, 0, v.scale, v.x, v.y);
+    draw();
+    ctx.restore();
+  }
+
+  function replay() {
+    const ctx = getCtx();
+    if (ctx) renderAll(ctx, store.getStrokes(), viewRef.current);
+  }
+
+  // Zoom badalte waqt drawing har frame mein sirf ek baar dobara banti hai.
+  function scheduleReplay() {
+    if (replayFrame.current) return;
+    replayFrame.current = requestAnimationFrame(() => {
+      replayFrame.current = 0;
+      replay();
+    });
+  }
+
+  function applyView(next) {
+    const cur = viewRef.current;
+    if (next.scale === cur.scale && next.x === cur.x && next.y === cur.y) return;
+    viewRef.current = next;
+    setView(next);
+    scheduleReplay();
+  }
+
+  function showToast(text) {
+    setToast(text);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 1400);
+  }
+
+  // ---------- cursors ----------
+  function moveCursor(slot, point, rect, diameter) {
+    const el = cursorEls.current[slot];
+    if (!el) return;
+    const px = Math.max(diameter * (rect.width / WIDTH), 14);
+    el.style.opacity = '1';
+    el.style.width = `${px}px`;
+    el.style.height = `${px}px`;
+    // Video mirror hai, is liye x ko ulta (1 - x) karte hain.
+    el.style.transform = `translate(${(1 - point.x) * rect.width}px, ${
+      point.y * rect.height
+    }px) translate(-50%, -50%)`;
+  }
+
+  // `from` se aage ke saare cursors chhupa deta hai.
+  function hideCursors(from = 0) {
+    for (let i = from; i < cursorEls.current.length; i++) {
+      const el = cursorEls.current[i];
+      if (el) el.style.opacity = '0';
+    }
+  }
+
+  // ---------- mode badalna ----------
+  function resetTracking() {
+    tools.pointers.forEach(resetPointer);
+    tools.pinch.reset();
+    sizeHold.current = { value: -1, count: 0 };
+    liveSize.current = sizeRef.current;
+  }
+
+  // Chalti hui saari strokes khatam karta hai. Shapes On ho to unhein perfect shape bana deta hai.
+  function endStroke() {
+    const live = store.actives();
+    if (!live.length) return;
+
+    let snapped = null;
+    if (shapesRef.current) {
+      for (const stroke of live) {
+        if (stroke.kind !== 'pen') continue;
+        const shape = recognizeShape(stroke.points, viewRef.current.scale);
+        if (shape) {
+          stroke.points = shape.points;
+          stroke.sharp = shape.sharp;
+          snapped = shape.type;
+        }
+      }
+    }
+
+    const ctx = getCtx();
+    if (!snapped && ctx) inView(ctx, () => live.forEach((stroke) => drawTail(ctx, stroke)));
+
+    store.end();
+
+    if (snapped) {
+      replay(); // kachchi line ki jagah perfect shape
+      showToast(SHAPE_LABEL[snapped]);
+    }
+  }
+
+  // nextKey: "draw|1", "double|0,2", "erase", "size", "idle" ya "none"
+  function changeMode(nextKey, now) {
+    const prev = modeRef.current;
+    keyRef.current = nextKey;
+    modeRef.current = nextKey.split('|')[0];
+    setMode(modeRef.current);
+    endStroke(); // ungli ya gesture badla: purani line khatam
+    resetDwell();
+    resetTracking();
+    if (prev === 'size') lockUntil.current = now + LOCK_MS;
+  }
+
+  // ---------- drawing ----------
+  // points = har seedhi ungli ka ek point. 'double' mein do points = do lines.
+  function paint(ctx, kind, points) {
+    const v = viewRef.current;
+    const erasing = kind === 'erase';
+
+    points.forEach((point, slot) => {
+      // Screen ka point -> drawing ka point (zoom ke hisaab se)
+      const target = screenToWorld(v, point.x * WIDTH, point.y * HEIGHT);
+      const stroke = store.active(slot);
+
+      if (!stroke) {
+        if (slot === 0) hueRef.current = Math.floor(Math.random() * 360);
+        store.begin(
+          slot,
+          {
+            kind: erasing ? 'eraser' : 'pen',
+            color: erasing ? '#000000' : colorRef.current,
+            // Zoom ho to brush screen par utna hi rehta hai, is liye drawing mein chhota
+            size: (erasing ? eraserSize(sizeRef.current) : sizeRef.current) / v.scale,
+            sym: symRef.current,
+            hue: (hueRef.current + slot * 120) % 360, // rainbow mein dono lines ke rang alag
+          },
+          target,
+        );
+        return;
+      }
+
+      const last = stroke.points[stroke.points.length - 1];
+      if (Math.hypot(target.x - last.x, target.y - last.y) < MIN_STEP / v.scale) return;
+
+      store.extend(slot, target);
+      inView(ctx, () => drawPiece(ctx, stroke)); // sirf naya tukda
+    });
+  }
+
+  // ---------- pinch se brush size ----------
+  function updateSize(hand, t) {
+    const live = sizeFromPinch(tools.pinch.filter(pinchRatio(hand), t));
+    liveSize.current = live; // cursor ka circle turant badalta hai
+
+    const hold = sizeHold.current;
+    if (hold.value < 0 || Math.abs(live - hold.value) > SIZE_TOLERANCE) {
+      sizeHold.current = { value: live, count: 0 };
+      return;
+    }
+
+    hold.count += 1;
+    if (hold.count >= SIZE_HOLD_FRAMES) {
+      const next = Math.round(hold.value);
+      if (next !== sizeRef.current) {
+        sizeRef.current = next; // asal size tabhi badalta hai jab pinch ruk jaye
+        setSize(next);
+      }
+    }
+  }
+
+  // ---------- zoom slider aur minimap (seedha, rukne ki zaroorat nahi) ----------
+  function adjustSliders(stage, cx, cy) {
+    for (const el of stage.querySelectorAll('[data-slider]')) {
+      const r = el.getBoundingClientRect();
+      if (cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) continue;
+
+      if (el.dataset.slider === 'zoom') {
+        const t = Math.min(Math.max((r.bottom - cy) / r.height, 0), 1);
+        applyView(zoomAbout(viewRef.current, Math.pow(MAX_ZOOM, t)));
+      } else {
+        const u = Math.min(Math.max((cx - r.left) / r.width, 0), 1);
+        const v = Math.min(Math.max((cy - r.top) / r.height, 0), 1);
+        // Minimap screen jaisa dikhta hai (mirror), is liye x ulta
+        applyView(panTo(viewRef.current, (1 - u) * WIDTH, v * HEIGHT));
+      }
+      return;
+    }
+  }
+
+  // ---------- dwell (rukkar button dabana) ----------
+  function resetDwell() {
+    dwell.current = { id: null, start: 0, fired: false };
+    setHover((prev) => (prev.id === null ? prev : NO_HOVER));
+  }
+
+  function updateDwell(cx, cy) {
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const target = [...stage.querySelectorAll('[data-gesture-id]')].find((node) => {
+      if (node.disabled) return false;
+      const r = node.getBoundingClientRect();
+      return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+    });
+
+    const id = target?.dataset.gestureId ?? null;
+    const d = dwell.current;
+
+    if (id !== d.id) {
+      dwell.current = { id, start: performance.now(), fired: false };
+      setHover(id ? { id, progress: 0 } : NO_HOVER);
+      return;
+    }
+    if (!id || d.fired) return;
+
+    const progress = Math.min((performance.now() - d.start) / DWELL_MS, 1);
+
+    if (progress >= 1) {
+      d.fired = true; // jab tak ungli hat na jaye, dobara nahi chalega
+      target.click();
+      setHover({ id, progress: 1 });
+      return;
+    }
+
+    const step = Math.round(progress * 10) / 10;
+    setHover((prev) => (prev.id === id && prev.progress === step ? prev : { id, progress: step }));
+  }
+
+  // Skeleton ke 21 points ko smooth karta hai, taake hologram kaanpe nahi.
+  function smoothHand(hand, t) {
+    return hand.map((p, i) => ({
+      x: tools.skeleton[i].x.filter(p.x, t),
+      y: tools.skeleton[i].y.filter(p.y, t),
+    }));
+  }
+
+  // ---------- har frame par haath ka result ----------
+  function handleResults(result) {
+    const ctx = getCtx();
+    const stage = stageRef.current;
+    if (!ctx || !stage) return;
+
+    const sctx = skelRef.current?.getContext('2d') ?? null;
+    const now = performance.now();
+
+    // Haath kabhi kabhi 1 se 2 frames ke liye gum ho jata hai. Pichla haath kuch frames tak
+    // istemal karte hain, taake line na tootay.
+    let hand = result.landmarks[0];
+    if (hand) {
+      lastHand.current = hand;
+      missed.current = 0;
+    } else if (lastHand.current && missed.current < MAX_MISSED) {
+      missed.current += 1;
+      hand = lastHand.current;
+    }
+
+    if (!hand) {
+      lastHand.current = null;
+      tools.reader.reset();
+      tools.stabilizer.reset('none');
+      tools.skeleton.forEach(resetPointer);
+      if (keyRef.current !== 'none') changeMode('none', now);
+      resetTracking();
+      hideCursors();
+      if (sctx) drawSkeleton(sctx, null);
+      return;
+    }
+
+    const t = now / 1000;
+
+    // 0) Hologram skeleton
+    if (sctx) drawSkeleton(sctx, skeletonRef.current ? smoothHand(hand, t) : null);
+
+    // 1) Haath padhna: kitni aur kaun si ungliyan seedhi hain. Phir debounce:
+    //    gesture (ya ungli) tabhi badle jab kai frames tak same rahe.
+    const rawKey = gestureKey(tools.reader.read(hand));
+    const stableKey = tools.stabilizer.update(rawKey);
+    if (stableKey !== keyRef.current) changeMode(stableKey, now);
+
+    const [stable, fingerList] = stableKey.split('|');
+    const fingers = fingerList ? fingerList.split(',').map(Number) : [0];
+
+    // 2) One Euro filter: har seedhi ungli ka apna smooth point.
+    const points = pointsFor(hand, stable, fingers).map((raw, i) => ({
+      x: tools.pointers[i].x.filter(raw.x, t),
+      y: tools.pointers[i].y.filter(raw.y, t),
+    }));
+    const primary = points[0];
+
+    const rect = stage.getBoundingClientRect();
+    const cx = rect.left + (1 - primary.x) * rect.width;
+    const cy = rect.top + primary.y * rect.height;
+    const overUi = isOverUi(stage, cx, cy);
+
+    if (stable === 'size') updateSize(hand, t);
+
+    const diameter =
+      stable === 'size'
+        ? liveSize.current
+        : stable === 'erase'
+          ? eraserSize(sizeRef.current)
+          : stable === 'draw' || stable === 'double'
+            ? sizeRef.current
+            : 24;
+    points.forEach((p, i) => moveCursor(i, p, rect, diameter));
+    hideCursors(points.length);
+
+    // 3) Draw ya erase (UI ke andar nahi, Rang Off mein nahi, aur pinch ke turant baad nahi).
+    //    Gesture ek do frame flicker kare to line sirf ruk jati hai, tootti nahi.
+    const drawing = stable === 'draw' || stable === 'double' || stable === 'erase';
+    if (drawing && inkRef.current && !overUi && now >= lockUntil.current) {
+      if (rawKey === stableKey) paint(ctx, stable, points);
+    } else {
+      endStroke();
+    }
+
+    // 4) Ungli UI par ho: slider/minimap seedha chalte hain, buttons rukne se dabte hain.
+    if (overUi && (stable === 'draw' || stable === 'double')) {
+      adjustSliders(stage, cx, cy);
+      updateDwell(cx, cy);
+    } else {
+      resetDwell();
+    }
+  }
+
+  const { status, error } = useHandTracker(videoRef, handleResults);
+
+  // ---------- actions ----------
+  function pickColor(next) {
+    colorRef.current = next;
+    setColor(next);
+  }
+
+  function handleSymmetry() {
+    const next = SYMMETRIES[(SYMMETRIES.indexOf(symRef.current) + 1) % SYMMETRIES.length];
+    symRef.current = next;
+    setSymmetry(next);
+  }
+
+  function toggleSkeleton() {
+    skeletonRef.current = !skeletonRef.current;
+    setSkeleton(skeletonRef.current);
+  }
+
+  function toggleInk() {
+    inkRef.current = !inkRef.current;
+    setInk(inkRef.current);
+    if (!inkRef.current) endStroke();
+  }
+
+  function toggleShapes() {
+    shapesRef.current = !shapesRef.current;
+    setShapes(shapesRef.current);
+  }
+
+  function handleUndo() {
+    if (store.undo()) replay();
+  }
+
+  function handleRedo() {
+    if (store.redo()) replay();
+  }
+
+  function handleClear() {
+    if (store.clear()) replay();
+  }
+
+  // factor 0 = zoom wapas 1x, warna maujooda zoom ko is se guna karo.
+  function handleZoom(factor) {
+    const v = viewRef.current;
+    applyView(factor === 0 ? IDENTITY_VIEW : zoomAbout(v, v.scale * factor));
+  }
+
+  function handleSave() {
+    // Poori drawing (zoom ke bina) alag canvas par bana kar save karte hain.
+    const full = document.createElement('canvas');
+    full.width = WIDTH;
+    full.height = HEIGHT;
+    renderAll(full.getContext('2d'), store.getStrokes());
+
+    const out = document.createElement('canvas');
+    out.width = WIDTH;
+    out.height = HEIGHT;
+    composeFrame(out.getContext('2d'), { strokes: full, withVideo: false });
+    out.toBlob((blob) => blob && downloadBlob(blob, `air-draw-${stamp()}.png`), 'image/png');
+  }
+
+  // Keyboard shortcuts (backup): Ctrl+Z, Ctrl+Y, C, S, R, + - 0
+  const actions = useRef({});
+  actions.current = {
+    undo: handleUndo,
+    redo: handleRedo,
+    clear: handleClear,
+    save: handleSave,
+    record: recorder.toggle,
+    zoom: handleZoom,
+  };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      if (mod && key === 'z') {
+        e.preventDefault();
+        actions.current.undo();
+      } else if (mod && key === 'y') {
+        e.preventDefault();
+        actions.current.redo();
+      } else if (!mod && key === 'c') actions.current.clear();
+      else if (!mod && key === 's') actions.current.save();
+      else if (!mod && key === 'r') actions.current.record();
+      else if (!mod && (key === '+' || key === '=')) actions.current.zoom(1.25);
+      else if (!mod && key === '-') actions.current.zoom(0.8);
+      else if (!mod && key === '0') actions.current.zoom(0);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(replayFrame.current);
+      clearTimeout(toastTimer.current);
+    },
+    [],
+  );
+
+  // ---------- cursor ka look ----------
+  const fill = color === RAINBOW ? RAINBOW_GRADIENT : color;
+  const glow = color === RAINBOW ? '#ffffff' : color;
+  const CURSOR_STYLE = {
+    draw: { background: fill, boxShadow: `0 0 18px ${glow}` },
+    double: { background: fill, boxShadow: `0 0 18px ${glow}` },
+    size: { background: fill, boxShadow: '0 0 0 3px #ffffff' },
+    erase: { background: 'rgba(255,255,255,0.15)', boxShadow: '0 0 0 3px #ffffff' },
+    select: { background: 'transparent', boxShadow: '0 0 0 3px #ffffff' },
+    idle: { background: 'rgba(255,255,255,0.35)', boxShadow: 'none' },
+    none: { background: 'rgba(255,255,255,0.35)', boxShadow: 'none' },
+  };
+  // Ungli button par ho to cursor safed ring ban jata hai.
+  const cursorStyle = hover.id ? CURSOR_STYLE.select : CURSOR_STYLE[mode];
+
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-6">
+      <div
+        ref={stageRef}
+        className="relative aspect-video w-full select-none overflow-hidden rounded-2xl bg-black"
+      >
+        {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte. */}
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          style={{ filter: videoFilter(filter) }}
+          className="absolute inset-0 h-full w-full -scale-x-100 object-cover"
+        />
+
+        {/* Drawing: Rang Off ho to chhup jati hai (mitti nahi) */}
+        <canvas
+          ref={canvasRef}
+          width={WIDTH}
+          height={HEIGHT}
+          style={{ opacity: ink ? 1 : 0 }}
+          className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 [filter:drop-shadow(0_0_6px_rgba(255,255,255,0.45))]"
+        />
+
+        {/* Hologram skeleton */}
+        <canvas
+          ref={skelRef}
+          width={WIDTH}
+          height={HEIGHT}
+          className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100"
+        />
+
+        <SymmetryGuides mode={symmetry} view={view} />
+
+        {/* Upar ka toolbar */}
+        <div data-ui className="absolute inset-x-0 top-0 z-10">
+          <Toolbar
+            colors={PALETTE}
+            color={color}
+            symmetry={symmetry}
+            hover={hover}
+            mode={mode}
+            size={size}
+            canUndo={store.canUndo}
+            canRedo={store.canRedo}
+            recording={recorder.recording}
+            canRecord={recorder.supported}
+            onColorChange={pickColor}
+            onSymmetry={handleSymmetry}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            onClear={handleClear}
+            onSave={handleSave}
+            onRecord={recorder.toggle}
+          />
+        </div>
+
+        {/* Baayein: toggles. Daayein: zoom. */}
+        <ModePanel
+          skeleton={skeleton}
+          ink={ink}
+          shapes={shapes}
+          hover={hover}
+          onSkeleton={toggleSkeleton}
+          onInk={toggleInk}
+          onShapes={toggleShapes}
+        />
+        <ZoomPanel view={view} hover={hover} onReset={() => handleZoom(0)} />
+
+        {/* Neeche ki filter patti */}
+        <FilterBar filters={FILTERS} value={filter} hover={hover} onChange={setFilter} />
+
+        {toast && (
+          <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100">
+            {toast}
+          </div>
+        )}
+
+        {/* Do cursors: har ungli ke liye ek (size, position aur opacity ref se set hote hain) */}
+        {[0, 1].map((slot) => (
+          <div
+            key={slot}
+            ref={(el) => {
+              cursorEls.current[slot] = el;
+            }}
+            className="pointer-events-none absolute left-0 top-0 z-20 rounded-full opacity-0"
+            style={cursorStyle}
+          />
+        ))}
+
+        {status !== 'ready' && (
+          <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 text-lg text-ink-100">
+            {status === 'loading' ? 'Camera aur model load ho rahe hain…' : `Error: ${error}`}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 grid gap-3 text-sm text-ink-400 sm:grid-cols-2 lg:grid-cols-3">
+        <p className="rounded-xl bg-ink-900 p-3">
+          ☝️ <b className="text-ink-100">Koi bhi ek ungli</b> (index, middle, ring ya pinky): ek line
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          ✌️ <b className="text-ink-100">Koi bhi do ungliyan</b>: do lines, har ungli ki apni
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          👆 <b className="text-ink-100">Button par</b> ungli 0.7 second rakhein: wo dab jayega
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          🖐️ <b className="text-ink-100">Khuli hatheli</b> (chaaron ungliyan): eraser
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          👌 <b className="text-ink-100">Pinch</b> (baaqi teen ungliyan upar): faasla = brush size
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          ✊ <b className="text-ink-100">Muthi ya teen ungliyan</b>: ruk jao
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          🔷 <b className="text-ink-100">Shapes On</b>: gola, square, triangle, seedhi line perfect ho jati hai
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          🦴 <b className="text-ink-100">Skeleton</b> aur <b className="text-ink-100">Rang</b>: Rang Off karein
+          to sirf haath dikhta hai
+        </p>
+        <p className="rounded-xl bg-ink-900 p-3">
+          🔍 <b className="text-ink-100">Daayein panel</b>: slider par ungli phirayein to zoom, minimap par
+          phirayein to drawing ka hissa badalta hai
+        </p>
+      </div>
+    </div>
+  );
+}

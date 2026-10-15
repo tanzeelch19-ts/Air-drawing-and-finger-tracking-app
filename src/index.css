@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #0b0f17;
+  --color-ink-900: #141a24;
+  --color-ink-800: #1c2432;
+  --color-ink-700: #263042;
+  --color-ink-400: #98a2b3;
+  --color-ink-100: #e6eaf2;
+  --color-ok-900: #14532d;
+  --color-ok-100: #bbf7d0;
+}
+
+@layer base {
+  body {
+    @apply bg-ink-950 text-ink-100 antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-blue-400);
+    outline-offset: 2px;
+  }
+}
