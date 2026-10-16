@@ -21,3 +21,10 @@
     outline-offset: 2px;
   }
 }
+
+/* Speed: live video ke upar backdrop blur har frame GPU par bhaari padta hai, is liye band. */
+[data-ui],
+[data-ui] * {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}

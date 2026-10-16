@@ -6,6 +6,10 @@ const WASM_URL =
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
+// Camera ka size: 16:9 rakhein (screen se match karta hai). Chhota frame = tez detection.
+const CAMERA_WIDTH = 960;
+const CAMERA_HEIGHT = 540;
+
 // Confidence 0.3: haath thoda dhundla ya tez harkat mein ho tab bhi tracking na chhute.
 function createLandmarker(vision, delegate) {
   return HandLandmarker.createFromOptions(vision, {
@@ -18,6 +22,7 @@ function createLandmarker(vision, delegate) {
   });
 }
 
+// onResults(result, { ms }): ms = is frame ki detection mein kitna waqt laga
 export function useHandTracker(videoRef, onResults) {
   const [status, setStatus] = useState('loading');
   const [error, setError] = useState(null);
@@ -31,9 +36,9 @@ export function useHandTracker(videoRef, onResults) {
     if (!video) return;
 
     let cancelled = false;
-    let frameId = 0;
     let landmarker = null;
     let stream = null;
+    let stopFrames = () => {};
 
     async function start() {
       try {
@@ -51,7 +56,12 @@ export function useHandTracker(videoRef, onResults) {
         }
 
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 1280, height: 720, frameRate: { ideal: 60 }, facingMode: 'user' },
+          video: {
+            width: { ideal: CAMERA_WIDTH },
+            height: { ideal: CAMERA_HEIGHT },
+            frameRate: { ideal: 60 },
+            facingMode: 'user',
+          },
           audio: false,
         });
         if (cancelled) {
@@ -63,17 +73,38 @@ export function useHandTracker(videoRef, onResults) {
         await video.play();
         setStatus('ready');
 
-        let lastTime = -1;
-        const loop = () => {
+        const detect = (now) => {
           if (cancelled || !landmarker) return;
-          // Detection sirf tab chalti hai jab video ka naya frame aaye.
-          if (video.currentTime !== lastTime) {
-            lastTime = video.currentTime;
-            onResultsRef.current(landmarker.detectForVideo(video, performance.now()));
-          }
-          frameId = requestAnimationFrame(loop);
+          const t0 = performance.now();
+          const result = landmarker.detectForVideo(video, now);
+          onResultsRef.current(result, { ms: performance.now() - t0 });
         };
-        loop();
+
+        if (typeof video.requestVideoFrameCallback === 'function') {
+          // Behtar: har naye camera frame par theek usi waqt detection (koi extra intezaar nahi).
+          let handle = 0;
+          const onFrame = (now) => {
+            if (cancelled) return;
+            detect(now);
+            handle = video.requestVideoFrameCallback(onFrame);
+          };
+          handle = video.requestVideoFrameCallback(onFrame);
+          stopFrames = () => video.cancelVideoFrameCallback?.(handle);
+        } else {
+          // Purane browsers ke liye: requestAnimationFrame se naya frame dhoondna.
+          let frameId = 0;
+          let lastTime = -1;
+          const loop = () => {
+            if (cancelled) return;
+            if (video.currentTime !== lastTime) {
+              lastTime = video.currentTime;
+              detect(performance.now());
+            }
+            frameId = requestAnimationFrame(loop);
+          };
+          loop();
+          stopFrames = () => cancelAnimationFrame(frameId);
+        }
       } catch (err) {
         if (!cancelled) {
           setStatus('error');
@@ -86,7 +117,7 @@ export function useHandTracker(videoRef, onResults) {
 
     return () => {
       cancelled = true;
-      cancelAnimationFrame(frameId);
+      stopFrames();
       stream?.getTracks().forEach((t) => t.stop());
       landmarker?.close();
     };

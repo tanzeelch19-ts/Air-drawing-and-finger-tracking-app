@@ -21,7 +21,22 @@ import { ZoomPanel } from './ZoomPanel';
 import { SymmetryGuides } from './SymmetryGuides';
 
 // ---------- Tuning: yahan se behtari kar sakte hain ----------
-const FILTER = { minCutoff: 1.0, beta: 10 }; // ungli ke point ke liye (kam minCutoff = zyada smooth)
+
+// Tracking ka mizaj:
+//   'smooth'   = zyada saaf line, thoda dheera
+//   'balanced' = beech ka (default)
+//   'fast'     = bilkul tez, thodi larzish
+const PRESET = 'balanced';
+const PRESETS = {
+  smooth: { minCutoff: 0.8, beta: 12 },
+  balanced: { minCutoff: 1.2, beta: 25 },
+  fast: { minCutoff: 2.0, beta: 45 },
+};
+const FILTER = PRESETS[PRESET];
+
+const EASE_MS = 16; // cursor aur skeleton screen ke refresh rate par kitna naram chalein (0 = band)
+const GLOW = true; // lines ki chamak. Computer dheera ho to false karein.
+
 const SKELETON_FILTER = { minCutoff: 2.0, beta: 12 }; // skeleton ke 21 points ke liye
 const PINCH_FILTER = { minCutoff: 1.2, beta: 6 }; // pinch ke faasle ke liye
 const ENTER_FRAMES = 3; // kisi gesture mein jane ke liye itne frames
@@ -60,13 +75,8 @@ const resetPointer = (p) => {
 const gestureKey = ({ gesture, fingers }) =>
   gesture === 'draw' || gesture === 'double' ? `${gesture}|${fingers.join(',')}` : gesture;
 
-// Ungli kisi UI (toolbar, panels ya filter bar) ke upar hai?
-function isOverUi(stage, cx, cy) {
-  return [...stage.querySelectorAll('[data-ui]')].some((el) => {
-    const r = el.getBoundingClientRect();
-    return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
-  });
-}
+// Point (x, y) dabbe b ke andar hai?
+const inBox = (b, x, y) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
 
 export function AirCanvas() {
   const stageRef = useRef(null);
@@ -104,6 +114,16 @@ export function AirCanvas() {
   const inkRef = useRef(true); // Rang On: drawing dikhe aur chale
   const shapesRef = useRef(false);
 
+  // UI ki jagah ek baar naap kar yaad rakhte hain (har frame par naapna dheera hota hai).
+  // Sab kuch stage ke kone se naapa jata hai, is liye scroll karne se farq nahi padta.
+  const layout = useRef({ width: 1, height: 1, ui: [], controls: [], sliders: [] });
+
+  // Screen par jo dikhana hai: detection ke baad naya target, aur screen ke refresh par naram chalna.
+  const display = useRef({ cursors: [], shown: [null, null], skeleton: null, skeletonShown: null });
+
+  // Tracking ki speed naapne ke liye
+  const statsRef = useRef({ start: performance.now(), frames: 0, ms: 0 });
+
   const [color, setColor] = useState(PALETTE[0]);
   const [size, setSize] = useState(DEFAULT_SIZE);
   const [symmetry, setSymmetry] = useState(SYMMETRIES[0]);
@@ -115,6 +135,7 @@ export function AirCanvas() {
   const [ink, setInk] = useState(true);
   const [shapes, setShapes] = useState(false);
   const [toast, setToast] = useState(null);
+  const [stats, setStats] = useState({ fps: 0, ms: 0 });
 
   const recorder = useRecorder((ctx) =>
     composeFrame(ctx, {
@@ -128,6 +149,24 @@ export function AirCanvas() {
   );
 
   const getCtx = () => canvasRef.current?.getContext('2d') ?? null;
+
+  // ---------- layout ----------
+  function measure() {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const s = stage.getBoundingClientRect();
+    const box = (el) => {
+      const r = el.getBoundingClientRect();
+      return { el, x0: r.left - s.left, y0: r.top - s.top, x1: r.right - s.left, y1: r.bottom - s.top };
+    };
+    layout.current = {
+      width: s.width,
+      height: s.height,
+      ui: [...stage.querySelectorAll('[data-ui]')].map(box),
+      controls: [...stage.querySelectorAll('[data-gesture-id]')].map(box),
+      sliders: [...stage.querySelectorAll('[data-slider]')].map(box),
+    };
+  }
 
   // ctx par zoom laga kar draw karta hai.
   function inView(ctx, draw) {
@@ -164,28 +203,6 @@ export function AirCanvas() {
     setToast(text);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 1400);
-  }
-
-  // ---------- cursors ----------
-  function moveCursor(slot, point, rect, diameter) {
-    const el = cursorEls.current[slot];
-    if (!el) return;
-    const px = Math.max(diameter * (rect.width / WIDTH), 14);
-    el.style.opacity = '1';
-    el.style.width = `${px}px`;
-    el.style.height = `${px}px`;
-    // Video mirror hai, is liye x ko ulta (1 - x) karte hain.
-    el.style.transform = `translate(${(1 - point.x) * rect.width}px, ${
-      point.y * rect.height
-    }px) translate(-50%, -50%)`;
-  }
-
-  // `from` se aage ke saare cursors chhupa deta hai.
-  function hideCursors(from = 0) {
-    for (let i = from; i < cursorEls.current.length; i++) {
-      const el = cursorEls.current[i];
-      if (el) el.style.opacity = '0';
-    }
   }
 
   // ---------- mode badalna ----------
@@ -295,21 +312,18 @@ export function AirCanvas() {
   }
 
   // ---------- zoom slider aur minimap (seedha, rukne ki zaroorat nahi) ----------
-  function adjustSliders(stage, cx, cy) {
-    for (const el of stage.querySelectorAll('[data-slider]')) {
-      const r = el.getBoundingClientRect();
-      if (cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) continue;
+  function adjustSliders(cx, cy) {
+    const hit = layout.current.sliders.find((b) => inBox(b, cx, cy));
+    if (!hit) return;
 
-      if (el.dataset.slider === 'zoom') {
-        const t = Math.min(Math.max((r.bottom - cy) / r.height, 0), 1);
-        applyView(zoomAbout(viewRef.current, Math.pow(MAX_ZOOM, t)));
-      } else {
-        const u = Math.min(Math.max((cx - r.left) / r.width, 0), 1);
-        const v = Math.min(Math.max((cy - r.top) / r.height, 0), 1);
-        // Minimap screen jaisa dikhta hai (mirror), is liye x ulta
-        applyView(panTo(viewRef.current, (1 - u) * WIDTH, v * HEIGHT));
-      }
-      return;
+    if (hit.el.dataset.slider === 'zoom') {
+      const t = Math.min(Math.max((hit.y1 - cy) / (hit.y1 - hit.y0), 0), 1);
+      applyView(zoomAbout(viewRef.current, Math.pow(MAX_ZOOM, t)));
+    } else {
+      const u = Math.min(Math.max((cx - hit.x0) / (hit.x1 - hit.x0), 0), 1);
+      const v = Math.min(Math.max((cy - hit.y0) / (hit.y1 - hit.y0), 0), 1);
+      // Minimap screen jaisa dikhta hai (mirror), is liye x ulta
+      applyView(panTo(viewRef.current, (1 - u) * WIDTH, v * HEIGHT));
     }
   }
 
@@ -320,15 +334,8 @@ export function AirCanvas() {
   }
 
   function updateDwell(cx, cy) {
-    const stage = stageRef.current;
-    if (!stage) return;
-
-    const target = [...stage.querySelectorAll('[data-gesture-id]')].find((node) => {
-      if (node.disabled) return false;
-      const r = node.getBoundingClientRect();
-      return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
-    });
-
+    const hit = layout.current.controls.find((b) => !b.el.disabled && inBox(b, cx, cy));
+    const target = hit?.el ?? null;
     const id = target?.dataset.gestureId ?? null;
     const d = dwell.current;
 
@@ -360,14 +367,26 @@ export function AirCanvas() {
     }));
   }
 
-  // ---------- har frame par haath ka result ----------
-  function handleResults(result) {
+  // ---------- har camera frame par haath ka result ----------
+  function handleResults(result, info) {
     const ctx = getCtx();
-    const stage = stageRef.current;
-    if (!ctx || !stage) return;
+    if (!ctx) return;
 
-    const sctx = skelRef.current?.getContext('2d') ?? null;
     const now = performance.now();
+    const d = display.current;
+    const { width, height, ui } = layout.current;
+
+    // Tracking ki speed (fps aur detection ka waqt), har aadhe second mein ek baar dikhate hain.
+    const s = statsRef.current;
+    s.frames += 1;
+    s.ms += info?.ms ?? 0;
+    if (now - s.start >= 500) {
+      setStats({
+        fps: Math.round((s.frames * 1000) / (now - s.start)),
+        ms: Math.round(s.ms / s.frames),
+      });
+      statsRef.current = { start: now, frames: 0, ms: 0 };
+    }
 
     // Haath kabhi kabhi 1 se 2 frames ke liye gum ho jata hai. Pichla haath kuch frames tak
     // istemal karte hain, taake line na tootay.
@@ -387,15 +406,15 @@ export function AirCanvas() {
       tools.skeleton.forEach(resetPointer);
       if (keyRef.current !== 'none') changeMode('none', now);
       resetTracking();
-      hideCursors();
-      if (sctx) drawSkeleton(sctx, null);
+      d.cursors = [];
+      d.skeleton = null;
       return;
     }
 
     const t = now / 1000;
 
-    // 0) Hologram skeleton
-    if (sctx) drawSkeleton(sctx, skeletonRef.current ? smoothHand(hand, t) : null);
+    // 0) Hologram skeleton (screen par naram chalna display loop ka kaam hai)
+    d.skeleton = skeletonRef.current ? smoothHand(hand, t) : null;
 
     // 1) Haath padhna: kitni aur kaun si ungliyan seedhi hain. Phir debounce:
     //    gesture (ya ungli) tabhi badle jab kai frames tak same rahe.
@@ -413,10 +432,10 @@ export function AirCanvas() {
     }));
     const primary = points[0];
 
-    const rect = stage.getBoundingClientRect();
-    const cx = rect.left + (1 - primary.x) * rect.width;
-    const cy = rect.top + primary.y * rect.height;
-    const overUi = isOverUi(stage, cx, cy);
+    // Stage ke andar ungli ki jagah (pixels mein). Video mirror hai, is liye x ulta.
+    const cx = (1 - primary.x) * width;
+    const cy = primary.y * height;
+    const overUi = ui.some((b) => inBox(b, cx, cy));
 
     if (stable === 'size') updateSize(hand, t);
 
@@ -428,8 +447,7 @@ export function AirCanvas() {
           : stable === 'draw' || stable === 'double'
             ? sizeRef.current
             : 24;
-    points.forEach((p, i) => moveCursor(i, p, rect, diameter));
-    hideCursors(points.length);
+    d.cursors = points.map((p) => ({ x: p.x, y: p.y, d: diameter }));
 
     // 3) Draw ya erase (UI ke andar nahi, Rang Off mein nahi, aur pinch ke turant baad nahi).
     //    Gesture ek do frame flicker kare to line sirf ruk jati hai, tootti nahi.
@@ -442,7 +460,7 @@ export function AirCanvas() {
 
     // 4) Ungli UI par ho: slider/minimap seedha chalte hain, buttons rukne se dabte hain.
     if (overUi && (stable === 'draw' || stable === 'double')) {
-      adjustSliders(stage, cx, cy);
+      adjustSliders(cx, cy);
       updateDwell(cx, cy);
     } else {
       resetDwell();
@@ -450,6 +468,102 @@ export function AirCanvas() {
   }
 
   const { status, error } = useHandTracker(videoRef, handleResults);
+
+  // UI naapna: shuru mein, aur jab bhi size badle.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return undefined;
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(stage);
+    stage.querySelectorAll('[data-ui]').forEach((el) => observer.observe(el));
+    window.addEventListener('resize', measure);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, []);
+
+  // Display loop: cursor aur skeleton ko screen ke refresh rate par naram chalata hai.
+  // Detection 30 fps par aati hai, ye beech ke jhatkon ko bhar deta hai.
+  useEffect(() => {
+    let frame = 0;
+    let last = performance.now();
+
+    const tick = (now) => {
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      const k = EASE_MS > 0 ? 1 - Math.exp(-dt / (EASE_MS / 1000)) : 1;
+      const d = display.current;
+      const { width, height } = layout.current;
+
+      // Cursors
+      for (let i = 0; i < cursorEls.current.length; i++) {
+        const el = cursorEls.current[i];
+        if (!el) continue;
+
+        const target = d.cursors[i];
+        if (!target) {
+          el.style.opacity = '0';
+          d.shown[i] = null;
+          continue;
+        }
+
+        const cur = d.shown[i] ?? { x: target.x, y: target.y, d: target.d };
+        cur.x += (target.x - cur.x) * k;
+        cur.y += (target.y - cur.y) * k;
+        cur.d = target.d;
+        d.shown[i] = cur;
+
+        const px = Math.max(cur.d * (width / WIDTH), 14);
+        el.style.opacity = '1';
+        el.style.width = `${px}px`;
+        el.style.height = `${px}px`;
+        // Video mirror hai, is liye x ko ulta (1 - x) karte hain.
+        el.style.transform = `translate(${(1 - cur.x) * width}px, ${cur.y * height}px) translate(-50%, -50%)`;
+      }
+
+      // Skeleton: sirf tab dobara banta hai jab kuch hila ho.
+      const sctx = skelRef.current?.getContext('2d');
+      if (sctx) {
+        const target = d.skeleton;
+        if (!target) {
+          if (d.skeletonShown) {
+            d.skeletonShown = null;
+            drawSkeleton(sctx, null);
+          }
+        } else {
+          let shown = d.skeletonShown;
+          let redraw = false;
+
+          if (!shown) {
+            shown = target.map((p) => ({ x: p.x, y: p.y }));
+            redraw = true;
+          } else {
+            target.forEach((p, i) => {
+              const dx = p.x - shown[i].x;
+              const dy = p.y - shown[i].y;
+              if (Math.abs(dx) > 1e-4 || Math.abs(dy) > 1e-4) {
+                shown[i].x += dx * k;
+                shown[i].y += dy * k;
+                redraw = true;
+              }
+            });
+          }
+
+          d.skeletonShown = shown;
+          if (redraw) drawSkeleton(sctx, shown);
+        }
+      }
+
+      frame = requestAnimationFrame(tick);
+    };
+
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   // ---------- actions ----------
   function pickColor(next) {
@@ -587,7 +701,9 @@ export function AirCanvas() {
           width={WIDTH}
           height={HEIGHT}
           style={{ opacity: ink ? 1 : 0 }}
-          className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 filter-[drop-shadow(0_0_6px_rgba(255,255,255,0.45))]"
+          className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 ${
+            GLOW ? '[filter:drop-shadow(0_0_6px_rgba(255,255,255,0.45))]' : ''
+          }`}
         />
 
         {/* Hologram skeleton */}
@@ -644,7 +760,7 @@ export function AirCanvas() {
           </div>
         )}
 
-        {/* Do cursors: har ungli ke liye ek (size, position aur opacity ref se set hote hain) */}
+        {/* Do cursors: har ungli ke liye ek (size, position aur opacity display loop se set hote hain) */}
         {[0, 1].map((slot) => (
           <div
             key={slot}
@@ -662,6 +778,10 @@ export function AirCanvas() {
           </div>
         )}
       </div>
+
+      <p className="mt-2 text-xs text-ink-400">
+        Tracking: {stats.fps} fps · detection {stats.ms} ms
+      </p>
 
       <div className="mt-4 grid gap-3 text-sm text-ink-400 sm:grid-cols-2 lg:grid-cols-3">
         <p className="rounded-xl bg-ink-900 p-3">

@@ -4,8 +4,9 @@ import { downloadBlob, stamp } from '@/lib/download';
 
 const TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
 const pickType = () => TYPES.find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
+const FRAME_MS = 1000 / 30; // recording 30 fps par: halki aur kaafi smooth
 
-// compose(ctx) har frame par ek alag canvas par poori tasveer banata hai.
+// compose(ctx) har frame par poori tasveer alag canvas par banata hai.
 export function useRecorder(compose) {
   const supported = typeof MediaRecorder !== 'undefined';
   const [recording, setRecording] = useState(false);
@@ -45,13 +46,17 @@ export function useRecorder(compose) {
       downloadBlob(new Blob(chunks, { type }), `air-draw-${stamp()}.webm`);
     };
 
-    const loop = () => {
-      composeRef.current(ctx);
+    let lastFrame = 0;
+    const loop = (now) => {
+      if (now - lastFrame >= FRAME_MS - 1) {
+        lastFrame = now;
+        composeRef.current(ctx);
+      }
       live.current.frameId = requestAnimationFrame(loop);
     };
 
     live.current.recorder = recorder;
-    loop(); // pehla frame recording shuru hone se pehle bana lein
+    loop(performance.now()); // pehla frame recording shuru hone se pehle bana lein
     recorder.start();
     setRecording(true);
   }, [supported]);
