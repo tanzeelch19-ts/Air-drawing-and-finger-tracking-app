@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { WIDTH, HEIGHT } from '@/lib/strokes';
 import { downloadBlob, stamp } from '@/lib/download';
 
-const TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+const TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
 const pickType = () => TYPES.find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
 const FRAME_MS = 1000 / 30; // recording 30 fps par: halki aur kaafi smooth
 
@@ -43,7 +43,8 @@ export function useRecorder(compose) {
     };
     recorder.onstop = () => {
       const type = recorder.mimeType || 'video/webm';
-      downloadBlob(new Blob(chunks, { type }), `air-draw-${stamp()}.webm`);
+      const ext = type.includes('mp4') ? 'mp4' : 'webm';
+      downloadBlob(new Blob(chunks, { type }), `air-draw-${stamp()}.${ext}`);
     };
 
     let lastFrame = 0;

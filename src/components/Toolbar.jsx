@@ -34,7 +34,7 @@ function ActionButton({ id, hover, tone = 'default', disabled, onClick, children
       data-gesture-id={id}
       disabled={disabled}
       onClick={onClick}
-      className={`relative cursor-pointer rounded-lg border px-4 py-2.5 text-sm font-medium text-ink-100 transition disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`relative cursor-pointer touch-manipulation rounded-lg border px-4 py-2.5 text-sm font-medium text-ink-100 transition disabled:cursor-not-allowed disabled:opacity-40 max-sm:px-3 max-sm:py-2 max-sm:text-xs @max-3xl:px-2.5 @max-3xl:py-1.5 @max-3xl:text-xs ${
         TONE[tone]
       } ${hovered ? 'scale-105 border-white' : ''}`}
     >
@@ -44,6 +44,7 @@ function ActionButton({ id, hover, tone = 'default', disabled, onClick, children
   );
 }
 
+// docked = true: phone ki chhoti screen mein stage ke neeche (touch se), warna stage ke upar (ungli se).
 export function Toolbar({
   colors,
   color,
@@ -55,6 +56,7 @@ export function Toolbar({
   canRedo,
   recording,
   canRecord,
+  docked = false,
   onColorChange,
   onSymmetry,
   onUndo,
@@ -64,8 +66,12 @@ export function Toolbar({
   onRecord,
 }) {
   return (
-    <div className="flex flex-col gap-3 bg-black/55 px-4 py-3 backdrop-blur-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div
+      className={`flex flex-col gap-3 bg-black/55 px-4 py-3 max-sm:gap-2 max-sm:px-3 max-sm:py-2 @max-3xl:gap-1.5 @max-3xl:px-2 @max-3xl:py-1.5 ${
+        docked ? 'rounded-xl' : ''
+      }`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 max-sm:gap-2 @max-3xl:gap-1.5">
         <ColorPalette colors={colors} value={color} hover={hover} onChange={onColorChange} />
         <ActionButton
           id="symmetry"
@@ -77,7 +83,7 @@ export function Toolbar({
         </ActionButton>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3 max-sm:gap-2 @max-3xl:gap-1.5">
         <ActionButton id="undo" hover={hover} disabled={!canUndo} onClick={onUndo}>
           Undo
         </ActionButton>
@@ -101,10 +107,14 @@ export function Toolbar({
         </ActionButton>
 
         <div className="ml-auto flex items-center gap-2" role="status">
-          <span className={`rounded-lg px-3 py-2 text-sm transition ${MODE_STYLE[mode]}`}>
+          <span
+            className={`rounded-lg px-3 py-2 text-sm transition max-sm:px-2 max-sm:py-1.5 max-sm:text-xs @max-3xl:px-2 @max-3xl:py-1 @max-3xl:text-xs ${MODE_STYLE[mode]}`}
+          >
             {MODE_LABEL[mode]}
           </span>
-          <span className="rounded-lg bg-ink-800 px-3 py-2 text-sm text-ink-100">Size {size}</span>
+          <span className="rounded-lg bg-ink-800 px-3 py-2 text-sm text-ink-100 max-sm:px-2 max-sm:py-1.5 max-sm:text-xs @max-3xl:px-2 @max-3xl:py-1 @max-3xl:text-xs">
+            Size {size}
+          </span>
         </div>
       </div>
     </div>

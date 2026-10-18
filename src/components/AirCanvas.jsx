@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useHandTracker } from '@/hooks/useHandTracker';
 import { useStrokes } from '@/hooks/useStrokes';
 import { useRecorder } from '@/hooks/useRecorder';
@@ -34,8 +34,9 @@ const PRESETS = {
 };
 const FILTER = PRESETS[PRESET];
 
+const COMPACT_BELOW = 720; // stage is se chhota ho to panels neeche chale jate hain (touch ke liye)
 const EASE_MS = 16; // cursor aur skeleton screen ke refresh rate par kitna naram chalein (0 = band)
-const GLOW = true; // lines ki chamak. Computer dheera ho to false karein.
+const GLOW = true; // lines ki chamak. Computer ya phone dheera ho to false karein.
 
 const SKELETON_FILTER = { minCutoff: 2.0, beta: 12 }; // skeleton ke 21 points ke liye
 const PINCH_FILTER = { minCutoff: 1.2, beta: 6 }; // pinch ke faasle ke liye
@@ -78,7 +79,10 @@ const gestureKey = ({ gesture, fingers }) =>
 // Point (x, y) dabbe b ke andar hai?
 const inBox = (b, x, y) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
 
+const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
+
 export function AirCanvas() {
+  const fullRef = useRef(null); // fullscreen wala dabba
   const stageRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null); // drawing
@@ -136,6 +140,8 @@ export function AirCanvas() {
   const [shapes, setShapes] = useState(false);
   const [toast, setToast] = useState(null);
   const [stats, setStats] = useState({ fps: 0, ms: 0 });
+  const [compact, setCompact] = useState(false); // chhoti screen: panels stage ke neeche
+  const [fullscreen, setFullscreen] = useState(false);
 
   const recorder = useRecorder((ctx) =>
     composeFrame(ctx, {
@@ -166,6 +172,11 @@ export function AirCanvas() {
       controls: [...stage.querySelectorAll('[data-gesture-id]')].map(box),
       sliders: [...stage.querySelectorAll('[data-slider]')].map(box),
     };
+
+    // Chhoti screen (jaise phone portrait): panels stage ke neeche chale jate hain.
+    // Fullscreen mein hamesha stage ke andar, taake ungli se control ho.
+    const small = s.width < COMPACT_BELOW && !document.fullscreenElement;
+    setCompact((prev) => (prev === small ? prev : small));
   }
 
   // ctx par zoom laga kar draw karta hai.
@@ -311,20 +322,29 @@ export function AirCanvas() {
     }
   }
 
-  // ---------- zoom slider aur minimap (seedha, rukne ki zaroorat nahi) ----------
+  // ---------- zoom slider aur minimap ----------
+  // u, v = slider ke andar jagah (0 se 1). Ungli, touch aur mouse teeno yahi istemal karte hain.
+  function handleSlide(kind, u, v) {
+    const cu = clamp01(u);
+    const cv = clamp01(v);
+
+    if (kind === 'zoom') {
+      applyView(zoomAbout(viewRef.current, Math.pow(MAX_ZOOM, 1 - cv))); // upar = zyada zoom
+    } else {
+      // Minimap screen jaisa dikhta hai (mirror), is liye x ulta
+      applyView(panTo(viewRef.current, (1 - cu) * WIDTH, cv * HEIGHT));
+    }
+  }
+
+  // Ungli ke liye: seedha, rukne ki zaroorat nahi.
   function adjustSliders(cx, cy) {
     const hit = layout.current.sliders.find((b) => inBox(b, cx, cy));
     if (!hit) return;
-
-    if (hit.el.dataset.slider === 'zoom') {
-      const t = Math.min(Math.max((hit.y1 - cy) / (hit.y1 - hit.y0), 0), 1);
-      applyView(zoomAbout(viewRef.current, Math.pow(MAX_ZOOM, t)));
-    } else {
-      const u = Math.min(Math.max((cx - hit.x0) / (hit.x1 - hit.x0), 0), 1);
-      const v = Math.min(Math.max((cy - hit.y0) / (hit.y1 - hit.y0), 0), 1);
-      // Minimap screen jaisa dikhta hai (mirror), is liye x ulta
-      applyView(panTo(viewRef.current, (1 - u) * WIDTH, v * HEIGHT));
-    }
+    handleSlide(
+      hit.el.dataset.slider,
+      (cx - hit.x0) / (hit.x1 - hit.x0),
+      (cy - hit.y0) / (hit.y1 - hit.y0),
+    );
   }
 
   // ---------- dwell (rukkar button dabana) ----------
@@ -469,8 +489,8 @@ export function AirCanvas() {
 
   const { status, error } = useHandTracker(videoRef, handleResults);
 
-  // UI naapna: shuru mein, aur jab bhi size badle.
-  useEffect(() => {
+  // UI naapna: shuru mein, jab size badle, aur jab panels jagah badlein (compact badalne par).
+  useLayoutEffect(() => {
     const stage = stageRef.current;
     if (!stage) return undefined;
 
@@ -484,6 +504,16 @@ export function AirCanvas() {
       observer.disconnect();
       window.removeEventListener('resize', measure);
     };
+  }, [compact]);
+
+  // Fullscreen ki halat par nazar
+  useEffect(() => {
+    const onChange = () => {
+      setFullscreen(Boolean(document.fullscreenElement));
+      measure();
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
   // Display loop: cursor aur skeleton ko screen ke refresh rate par naram chalata hai.
@@ -611,6 +641,23 @@ export function AirCanvas() {
     applyView(factor === 0 ? IDENTITY_VIEW : zoomAbout(v, v.scale * factor));
   }
 
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+      await fullRef.current?.requestFullscreen();
+      try {
+        await screen.orientation.lock('landscape'); // sab browsers mein nahi chalta
+      } catch {
+        /* koi baat nahi */
+      }
+    } catch {
+      /* browser ne fullscreen se mana kar diya */
+    }
+  }
+
   function handleSave() {
     // Poori drawing (zoom ke bina) alag canvas par bana kar save karte hain.
     const full = document.createElement('canvas');
@@ -680,110 +727,168 @@ export function AirCanvas() {
   // Ungli button par ho to cursor safed ring ban jata hai.
   const cursorStyle = hover.id ? CURSOR_STYLE.select : CURSOR_STYLE[mode];
 
+  // ---------- panels ----------
+  // Ek hi panels do jagah dikh sakte hain: stage ke andar (ungli se) ya neeche (touch se).
+  const toolbar = (
+    <Toolbar
+      colors={PALETTE}
+      color={color}
+      symmetry={symmetry}
+      hover={hover}
+      mode={mode}
+      size={size}
+      canUndo={store.canUndo}
+      canRedo={store.canRedo}
+      recording={recorder.recording}
+      canRecord={recorder.supported}
+      docked={compact}
+      onColorChange={pickColor}
+      onSymmetry={handleSymmetry}
+      onUndo={handleUndo}
+      onRedo={handleRedo}
+      onClear={handleClear}
+      onSave={handleSave}
+      onRecord={recorder.toggle}
+    />
+  );
+  const modes = (
+    <ModePanel
+      skeleton={skeleton}
+      ink={ink}
+      shapes={shapes}
+      hover={hover}
+      docked={compact}
+      onSkeleton={toggleSkeleton}
+      onInk={toggleInk}
+      onShapes={toggleShapes}
+    />
+  );
+  const zoom = (
+    <ZoomPanel
+      view={view}
+      hover={hover}
+      docked={compact}
+      onReset={() => handleZoom(0)}
+      onSlide={handleSlide}
+    />
+  );
+  const filters = (
+    <FilterBar filters={FILTERS} value={filter} hover={hover} docked={compact} onChange={setFilter} />
+  );
+
+  const canFullscreen = typeof document !== 'undefined' && document.fullscreenEnabled;
+
   return (
-    <div className="mx-auto max-w-5xl px-4 py-6">
-      <div
-        ref={stageRef}
-        className="relative aspect-video w-full select-none overflow-hidden rounded-2xl bg-black"
-      >
-        {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte. */}
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          style={{ filter: videoFilter(filter) }}
-          className="absolute inset-0 h-full w-full -scale-x-100 object-cover"
-        />
-
-        {/* Drawing: Rang Off ho to chhup jati hai (mitti nahi) */}
-        <canvas
-          ref={canvasRef}
-          width={WIDTH}
-          height={HEIGHT}
-          style={{ opacity: ink ? 1 : 0 }}
-          className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 ${
-            GLOW ? '[filter:drop-shadow(0_0_6px_rgba(255,255,255,0.45))]' : ''
-          }`}
-        />
-
-        {/* Hologram skeleton */}
-        <canvas
-          ref={skelRef}
-          width={WIDTH}
-          height={HEIGHT}
-          className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100"
-        />
-
-        <SymmetryGuides mode={symmetry} view={view} />
-
-        {/* Upar ka toolbar */}
-        <div data-ui className="absolute inset-x-0 top-0 z-10">
-          <Toolbar
-            colors={PALETTE}
-            color={color}
-            symmetry={symmetry}
-            hover={hover}
-            mode={mode}
-            size={size}
-            canUndo={store.canUndo}
-            canRedo={store.canRedo}
-            recording={recorder.recording}
-            canRecord={recorder.supported}
-            onColorChange={pickColor}
-            onSymmetry={handleSymmetry}
-            onUndo={handleUndo}
-            onRedo={handleRedo}
-            onClear={handleClear}
-            onSave={handleSave}
-            onRecord={recorder.toggle}
+    <div
+      className="mx-auto max-w-5xl px-3 py-4 sm:px-4 sm:py-6"
+      style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
+    >
+      {/* Fullscreen mein sirf ye dabba aata hai; stage beech mein 16:9 hi rehta hai */}
+      <div ref={fullRef} className="flex items-center justify-center [&:fullscreen]:bg-black">
+        <div
+          ref={stageRef}
+          style={{ width: 'min(100%, calc((100dvh - 1rem) * 16 / 9))' }}
+          className="@container relative aspect-video select-none overflow-hidden rounded-2xl bg-black"
+        >
+          {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte. */}
+          <video
+            ref={videoRef}
+            playsInline
+            muted
+            style={{ filter: videoFilter(filter) }}
+            className="absolute inset-0 h-full w-full -scale-x-100 object-cover"
           />
+
+          {/* Drawing: Rang Off ho to chhup jati hai (mitti nahi) */}
+          <canvas
+            ref={canvasRef}
+            width={WIDTH}
+            height={HEIGHT}
+            style={{ opacity: ink ? 1 : 0 }}
+            className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 ${
+              GLOW ? '[filter:drop-shadow(0_0_6px_rgba(255,255,255,0.45))]' : ''
+            }`}
+          />
+
+          {/* Hologram skeleton */}
+          <canvas
+            ref={skelRef}
+            width={WIDTH}
+            height={HEIGHT}
+            className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100"
+          />
+
+          <SymmetryGuides mode={symmetry} view={view} />
+
+          {/* Bari screen ya fullscreen: panels stage ke andar, ungli se control */}
+          {!compact && (
+            <>
+              <div data-ui className="absolute inset-x-0 top-0 z-10">
+                {toolbar}
+              </div>
+              {modes}
+              {zoom}
+              {filters}
+            </>
+          )}
+
+          {toast && (
+            <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100 @max-3xl:bottom-16 @max-3xl:text-xs">
+              {toast}
+            </div>
+          )}
+
+          {/* Do cursors: har ungli ke liye ek (size, position aur opacity display loop se set hote hain) */}
+          {[0, 1].map((slot) => (
+            <div
+              key={slot}
+              ref={(el) => {
+                cursorEls.current[slot] = el;
+              }}
+              className="pointer-events-none absolute left-0 top-0 z-20 rounded-full opacity-0"
+              style={cursorStyle}
+            />
+          ))}
+
+          {status !== 'ready' && (
+            <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 px-4 text-center text-base text-ink-100 sm:text-lg">
+              {status === 'loading' ? 'Camera aur model load ho rahe hain…' : `Error: ${error}`}
+            </div>
+          )}
         </div>
+      </div>
 
-        {/* Baayein: toggles. Daayein: zoom. */}
-        <ModePanel
-          skeleton={skeleton}
-          ink={ink}
-          shapes={shapes}
-          hover={hover}
-          onSkeleton={toggleSkeleton}
-          onInk={toggleInk}
-          onShapes={toggleShapes}
-        />
-        <ZoomPanel view={view} hover={hover} onReset={() => handleZoom(0)} />
-
-        {/* Neeche ki filter patti */}
-        <FilterBar filters={FILTERS} value={filter} hover={hover} onChange={setFilter} />
-
-        {toast && (
-          <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100">
-            {toast}
+      {/* Chhoti screen: panels stage ke neeche, touch se */}
+      {compact && (
+        <div className="mt-3 flex flex-col gap-3">
+          <p className="text-xs text-ink-400">
+            Phone ko landscape mein ghumayein ya Fullscreen dabayein, to ye sab ungli se hi control honge.
+          </p>
+          {toolbar}
+          <div className="flex flex-wrap items-start gap-3">
+            {modes}
+            {zoom}
           </div>
-        )}
+          {filters}
+        </div>
+      )}
 
-        {/* Do cursors: har ungli ke liye ek (size, position aur opacity display loop se set hote hain) */}
-        {[0, 1].map((slot) => (
-          <div
-            key={slot}
-            ref={(el) => {
-              cursorEls.current[slot] = el;
-            }}
-            className="pointer-events-none absolute left-0 top-0 z-20 rounded-full opacity-0"
-            style={cursorStyle}
-          />
-        ))}
-
-        {status !== 'ready' && (
-          <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 text-lg text-ink-100">
-            {status === 'loading' ? 'Camera aur model load ho rahe hain…' : `Error: ${error}`}
-          </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-ink-400">
+          Tracking: {stats.fps} fps · detection {stats.ms} ms
+        </p>
+        {canFullscreen && (
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            className="cursor-pointer touch-manipulation rounded-lg border border-ink-700 bg-ink-900 px-3 py-1.5 text-xs font-medium text-ink-100"
+          >
+            {fullscreen ? 'Fullscreen band karein' : 'Fullscreen'}
+          </button>
         )}
       </div>
 
-      <p className="mt-2 text-xs text-ink-400">
-        Tracking: {stats.fps} fps · detection {stats.ms} ms
-      </p>
-
-      <div className="mt-4 grid gap-3 text-sm text-ink-400 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-4 grid gap-3 text-xs text-ink-400 sm:grid-cols-2 sm:text-sm lg:grid-cols-3">
         <p className="rounded-xl bg-ink-900 p-3">
           ☝️ <b className="text-ink-100">Koi bhi ek ungli</b> (index, middle, ring ya pinky): ek line
         </p>
@@ -810,7 +915,7 @@ export function AirCanvas() {
           to sirf haath dikhta hai
         </p>
         <p className="rounded-xl bg-ink-900 p-3">
-          🔍 <b className="text-ink-100">Daayein panel</b>: slider par ungli phirayein to zoom, minimap par
+          🔍 <b className="text-ink-100">Zoom panel</b>: slider par ungli phirayein to zoom, minimap par
           phirayein to drawing ka hissa badalta hai
         </p>
       </div>

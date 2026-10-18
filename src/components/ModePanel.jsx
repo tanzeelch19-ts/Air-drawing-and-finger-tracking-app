@@ -8,7 +8,7 @@ function Toggle({ id, label, on, hover, onClick }) {
       data-gesture-id={id}
       aria-pressed={on}
       onClick={onClick}
-      className={`relative cursor-pointer rounded-lg border px-3 py-2.5 text-left text-sm font-medium text-ink-100 transition ${
+      className={`relative cursor-pointer touch-manipulation rounded-lg border px-3 py-2.5 text-left text-sm font-medium text-ink-100 transition max-sm:py-2 max-sm:text-xs @max-3xl:px-2 @max-3xl:py-1.5 @max-3xl:text-xs ${
         on ? 'border-emerald-400 bg-emerald-900/70' : 'border-ink-700 bg-ink-900/80'
       } ${hovered ? 'scale-105 border-white' : ''}`}
     >
@@ -18,12 +18,16 @@ function Toggle({ id, label, on, hover, onClick }) {
   );
 }
 
-// Baayein taraf ke toggles: ungli 0.7 second rakhein to on ya off.
-export function ModePanel({ skeleton, ink, shapes, hover, onSkeleton, onInk, onShapes }) {
+// Toggles. docked = true: stage ke neeche (touch se), warna stage ke baayein taraf (ungli se).
+export function ModePanel({ skeleton, ink, shapes, hover, docked = false, onSkeleton, onInk, onShapes }) {
   return (
     <div
       data-ui
-      className="absolute bottom-20 left-3 z-10 flex flex-col gap-3 rounded-xl bg-black/55 p-2 backdrop-blur-sm"
+      className={
+        docked
+          ? 'flex flex-wrap gap-2 rounded-xl bg-black/55 p-2'
+          : 'absolute bottom-20 left-3 z-10 flex flex-col gap-3 rounded-xl bg-black/55 p-2 @max-3xl:bottom-14 @max-3xl:left-2 @max-3xl:gap-2 @max-3xl:p-1.5'
+      }
     >
       <Toggle id="toggle:skeleton" label="Skeleton" on={skeleton} hover={hover} onClick={onSkeleton} />
       <Toggle id="toggle:ink" label="Rang" on={ink} hover={hover} onClick={onInk} />
