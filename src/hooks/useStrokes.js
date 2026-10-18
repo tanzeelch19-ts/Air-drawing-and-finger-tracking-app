@@ -74,6 +74,20 @@ export function useStrokes() {
     return true;
   }, []);
 
+  // Drawing ka naap badalne par (jaise phone portrait se landscape): har point par `mapPoint`,
+  // aur brush ki motai par `scale` lagata hai. Redo wali strokes bhi badalti hain.
+  const remap = useCallback((mapPoint, scale) => {
+    const d = data.current;
+    const apply = (stroke) => {
+      if (stroke.kind === 'clear') return;
+      stroke.points = stroke.points.map(mapPoint);
+      stroke.size *= scale;
+    };
+    d.strokes.forEach(apply);
+    d.undone.forEach((group) => group.forEach(apply));
+    bump();
+  }, []);
+
   const getStrokes = useCallback(() => data.current.strokes, []);
 
   return {
@@ -85,6 +99,7 @@ export function useStrokes() {
     undo,
     redo,
     clear,
+    remap,
     getStrokes,
     canUndo: data.current.strokes.length > 0,
     canRedo: data.current.undone.length > 0,

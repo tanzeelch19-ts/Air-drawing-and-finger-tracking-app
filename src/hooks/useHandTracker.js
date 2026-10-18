@@ -6,9 +6,20 @@ const WASM_URL =
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-// Camera ka size: 16:9 rakhein (screen se match karta hai). Chhota frame = tez detection.
-const CAMERA_WIDTH = 960;
-const CAMERA_HEIGHT = 540;
+// Camera ka size: lambi aur chhoti side. Chhota frame = tez detection.
+const CAMERA_LONG = 960;
+const CAMERA_SHORT = 540;
+
+// Phone seedha (portrait) pakda ho to camera se tall frame maangte hain, warna wide frame.
+// Asal naap camera khud tay karta hai, app usi ke hisaab se stage banati hai.
+function cameraSize() {
+  const phonePortrait =
+    window.matchMedia('(pointer: coarse)').matches &&
+    window.matchMedia('(orientation: portrait)').matches;
+  return phonePortrait
+    ? { width: CAMERA_SHORT, height: CAMERA_LONG }
+    : { width: CAMERA_LONG, height: CAMERA_SHORT };
+}
 
 // Confidence 0.3: haath thoda dhundla ya tez harkat mein ho tab bhi tracking na chhute.
 function createLandmarker(vision, delegate) {
@@ -55,10 +66,11 @@ export function useHandTracker(videoRef, onResults) {
           return;
         }
 
+        const { width, height } = cameraSize();
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: CAMERA_WIDTH },
-            height: { ideal: CAMERA_HEIGHT },
+            width: { ideal: width },
+            height: { ideal: height },
             frameRate: { ideal: 60 },
             facingMode: 'user',
           },

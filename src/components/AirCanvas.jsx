@@ -5,7 +5,16 @@ import { useRecorder } from '@/hooks/useRecorder';
 import { createHandReader, pinchRatio, pointsFor } from '@/lib/hand';
 import { OneEuroFilter } from '@/lib/oneEuro';
 import { createGestureStabilizer } from '@/lib/stabilizer';
-import { drawPiece, drawTail, renderAll, IDENTITY_VIEW, WIDTH, HEIGHT } from '@/lib/strokes';
+import {
+  drawPiece,
+  drawTail,
+  renderAll,
+  setCanvasSize,
+  sizeForAspect,
+  IDENTITY_VIEW,
+  WIDTH,
+  HEIGHT,
+} from '@/lib/strokes';
 import { recognizeShape } from '@/lib/shapes';
 import { drawSkeleton } from '@/lib/skeleton';
 import { MAX_ZOOM, panTo, screenToWorld, zoomAbout } from '@/lib/view';
@@ -81,7 +90,20 @@ const inBox = (b, x, y) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
 
 const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
 
+// Shuru ka andaza: phone seedha ho to tall (portrait), warna wide. Camera aane par asal naap lag jata hai.
+function guessSize() {
+  const phonePortrait =
+    window.matchMedia('(pointer: coarse)').matches &&
+    window.matchMedia('(orientation: portrait)').matches;
+  const next = sizeForAspect(phonePortrait ? 9 / 16 : 16 / 9);
+  setCanvasSize(next.width, next.height);
+  return next;
+}
+
 export function AirCanvas() {
+  // Drawing ka naap (camera ke aspect ke mutabiq). Badalne par canvases dobara banti hain.
+  const [canvasDims, setCanvasDims] = useState(guessSize);
+
   const fullRef = useRef(null); // fullscreen wala dabba
   const stageRef = useRef(null);
   const videoRef = useRef(null);
@@ -214,6 +236,28 @@ export function AirCanvas() {
     setToast(text);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 1400);
+  }
+
+  // ---------- camera ka asli naap ----------
+  // Camera ka frame portrait ho ya landscape, stage aur drawing usi naap ki ban jati hai,
+  // is liye koi hissa katta nahi aur haath ki jagah bilkul sahi rehti hai.
+  function applyAspect(aspect) {
+    const next = sizeForAspect(aspect);
+    if (next.width === WIDTH && next.height === HEIGHT) return;
+
+    endStroke(); // chalti line pehle khatam
+
+    // Pehle se bani drawing ko naye naap ke beech mein laate hain (shakal nahi bigadti).
+    const k = Math.min(next.width / WIDTH, next.height / HEIGHT);
+    const ox = (next.width - WIDTH * k) / 2;
+    const oy = (next.height - HEIGHT * k) / 2;
+    store.remap((p) => ({ x: p.x * k + ox, y: p.y * k + oy }), k);
+
+    setCanvasSize(next.width, next.height);
+    viewRef.current = IDENTITY_VIEW;
+    setView(IDENTITY_VIEW);
+    display.current.skeletonShown = null; // canvas saaf hogi, skeleton dobara banega
+    setCanvasDims(next);
   }
 
   // ---------- mode badalna ----------
@@ -488,6 +532,30 @@ export function AirCanvas() {
   }
 
   const { status, error } = useHandTracker(videoRef, handleResults);
+
+  // Camera ka asli naap dekhna: shuru mein aur jab phone ghumane se frame badle.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return undefined;
+
+    const update = () => {
+      if (video.videoWidth && video.videoHeight) applyAspect(video.videoWidth / video.videoHeight);
+    };
+
+    update();
+    video.addEventListener('loadedmetadata', update);
+    video.addEventListener('resize', update);
+    return () => {
+      video.removeEventListener('loadedmetadata', update);
+      video.removeEventListener('resize', update);
+    };
+  }, [status]);
+
+  // Naap badalne par canvases khali ho jati hain: drawing dobara banao aur UI dobara naapo.
+  useLayoutEffect(() => {
+    replay();
+    measure();
+  }, [canvasDims]);
 
   // UI naapna: shuru mein, jab size badle, aur jab panels jagah badlein (compact badalne par).
   useLayoutEffect(() => {
@@ -778,17 +846,23 @@ export function AirCanvas() {
 
   const canFullscreen = typeof document !== 'undefined' && document.fullscreenEnabled;
 
+  // Stage ka aspect camera ke aspect jaisa (portrait mein tall, landscape mein wide).
+  const aspect = canvasDims.width / canvasDims.height;
+
   return (
     <div
       className="mx-auto max-w-5xl px-3 py-4 sm:px-4 sm:py-6"
       style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
     >
-      {/* Fullscreen mein sirf ye dabba aata hai; stage beech mein 16:9 hi rehta hai */}
+      {/* Fullscreen mein sirf ye dabba aata hai; stage beech mein apne aspect mein hi rehta hai */}
       <div ref={fullRef} className="flex items-center justify-center [&:fullscreen]:bg-black">
         <div
           ref={stageRef}
-          style={{ width: 'min(100%, calc((100dvh - 1rem) * 16 / 9))' }}
-          className="@container relative aspect-video select-none overflow-hidden rounded-2xl bg-black"
+          style={{
+            width: `min(100%, calc((100dvh - 1rem) * ${aspect}))`,
+            aspectRatio: `${canvasDims.width} / ${canvasDims.height}`,
+          }}
+          className="@container relative select-none overflow-hidden rounded-2xl bg-black"
         >
           {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte. */}
           <video
@@ -802,8 +876,8 @@ export function AirCanvas() {
           {/* Drawing: Rang Off ho to chhup jati hai (mitti nahi) */}
           <canvas
             ref={canvasRef}
-            width={WIDTH}
-            height={HEIGHT}
+            width={canvasDims.width}
+            height={canvasDims.height}
             style={{ opacity: ink ? 1 : 0 }}
             className={`pointer-events-none absolute inset-0 h-full w-full -scale-x-100 transition-opacity duration-200 ${
               GLOW ? '[filter:drop-shadow(0_0_6px_rgba(255,255,255,0.45))]' : ''
@@ -813,8 +887,8 @@ export function AirCanvas() {
           {/* Hologram skeleton */}
           <canvas
             ref={skelRef}
-            width={WIDTH}
-            height={HEIGHT}
+            width={canvasDims.width}
+            height={canvasDims.height}
             className="pointer-events-none absolute inset-0 h-full w-full -scale-x-100"
           />
 
@@ -875,7 +949,7 @@ export function AirCanvas() {
 
       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-ink-400">
-          Tracking: {stats.fps} fps · detection {stats.ms} ms
+          Tracking: {stats.fps} fps · detection {stats.ms} ms · frame {canvasDims.width}×{canvasDims.height}
         </p>
         {canFullscreen && (
           <button

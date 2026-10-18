@@ -1,3 +1,5 @@
+import { WIDTH, HEIGHT } from './strokes';
+
 // MediaPipe hand landmark indexes
 export const LANDMARK = {
   WRIST: 0,
@@ -22,15 +24,16 @@ const FINGERS = [
 ];
 const TIPS = FINGERS.map((f) => f.tip);
 
-const ASPECT = 16 / 9; // landmarks 0 se 1 ke hain, is liye x ko aspect se barabar karte hain
 export const PINCH_MAX = 0.5; // is se kam faasla = pinch (👌)
 
-// Ungli seedhi hai ya mudi: sira kalai se pip ke muqable mein kitna door hai.
+// Ungli seedha hai ya mudi: sira kalai se pip ke muqable mein kitna door hai.
 // Do hadein hain taake beech ki halat mein ungli ek se doosre haal mein jhoolti na rahe.
 const UP_ON = 1.15; // is se zyada: seedhi
 const UP_OFF = 1.05; // is se kam: mudi
 
-const dist = (a, b) => Math.hypot((a.x - b.x) * ASPECT, a.y - b.y);
+// Landmarks har taraf 0 se 1 ke hain, is liye x ko frame ke aspect (WIDTH / HEIGHT) se barabar karte hain.
+// Portrait mein ye aspect chhota hota hai, landscape mein bada.
+const dist = (a, b) => Math.hypot((a.x - b.x) * (WIDTH / HEIGHT), a.y - b.y);
 
 // Angootha aur index ke sire ka faasla, haath ki hatheli ki lambai se naapa hua.
 export function pinchRatio(hand) {

@@ -1,13 +1,29 @@
 import { RAINBOW } from './colors';
 
-export const WIDTH = 1280;
-export const HEIGHT = 720;
+// Drawing ka naap. Ye camera ke aspect ke hisaab se badalta hai:
+// landscape = 1280x720, portrait (phone) = 720x1280.
+// "export let" ki wajah se dusri files mein bhi naya naap apne aap dikhta hai.
+export let WIDTH = 1280;
+export let HEIGHT = 720;
+
+const LONG_SIDE = 1280;
+
+export function setCanvasSize(width, height) {
+  WIDTH = width;
+  HEIGHT = height;
+}
+
+// Camera ke aspect (chaurai / ooncha'i) se drawing ka naap nikalta hai. Lambi side hamesha 1280.
+export function sizeForAspect(aspect) {
+  const a = Math.min(Math.max(aspect, 0.4), 2.5);
+  return a >= 1
+    ? { width: LONG_SIDE, height: Math.round(LONG_SIDE / a) }
+    : { width: Math.round(LONG_SIDE * a), height: LONG_SIDE };
+}
 
 // Zoom nahi: scale 1, koi khiskaav nahi.
 export const IDENTITY_VIEW = { scale: 1, x: 0, y: 0 };
 
-const CX = WIDTH / 2;
-const CY = HEIGHT / 2;
 const TAU = Math.PI * 2;
 
 // Har stroke ki kitni copies banengi (rotate ya flip ke saath).
@@ -70,6 +86,10 @@ function paintPieces(ctx, stroke, pieces) {
   if (!pieces.length) return;
   const rainbow = stroke.color === RAINBOW;
 
+  // Symmetry ka markaz drawing ke beech mein hai (naap badalne par ye bhi badalta hai).
+  const cx = WIDTH / 2;
+  const cy = HEIGHT / 2;
+
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -78,10 +98,10 @@ function paintPieces(ctx, stroke, pieces) {
 
   for (const { angle, flip } of SYMMETRY_TRANSFORMS[stroke.sym] ?? SYMMETRY_TRANSFORMS.off) {
     ctx.save();
-    ctx.translate(CX, CY);
+    ctx.translate(cx, cy);
     ctx.rotate(angle);
     if (flip) ctx.scale(-1, 1);
-    ctx.translate(-CX, -CY);
+    ctx.translate(-cx, -cy);
 
     if (rainbow) {
       // Har tukde ka apna rang: tukde ke number se hue nikalta hai.

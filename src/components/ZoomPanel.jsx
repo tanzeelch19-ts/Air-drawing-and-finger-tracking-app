@@ -8,6 +8,7 @@ import { DwellBar } from './DwellBar';
 export function ZoomPanel({ view, hover, docked = false, onReset, onSlide }) {
   const t = Math.log(view.scale) / Math.log(MAX_ZOOM); // 0 se 1
   const resetHovered = hover.id === 'zoom-reset';
+  const portrait = HEIGHT > WIDTH;
 
   // Minimap mein dikhne wala hissa (screen jaisa, is liye x ulta)
   const x0 = -view.x / view.scale;
@@ -39,11 +40,15 @@ export function ZoomPanel({ view, hover, docked = false, onReset, onSlide }) {
           : 'absolute bottom-20 right-3 z-10 flex w-28 flex-col items-center gap-2 rounded-xl bg-black/55 p-2 @max-3xl:bottom-14 @max-3xl:right-2 @max-3xl:w-24 @max-3xl:gap-1.5 @max-3xl:p-1.5'
       }
     >
+      {/* Minimap: drawing ke aspect jaisa (portrait mein tall, landscape mein wide) */}
       <div
         data-slider="pan"
         aria-label="Drawing ka hissa chunein"
         {...slide('pan')}
-        className="relative h-14 w-24 touch-none overflow-hidden rounded border border-ink-700 bg-ink-900/80 @max-3xl:h-10 @max-3xl:w-[71px]"
+        style={{ aspectRatio: `${WIDTH} / ${HEIGHT}` }}
+        className={`relative touch-none overflow-hidden rounded border border-ink-700 bg-ink-900/80 ${
+          portrait ? 'h-24 @max-3xl:h-16' : 'w-24 @max-3xl:w-[71px]'
+        }`}
       >
         <div
           className="pointer-events-none absolute rounded-sm border border-cyan-300 bg-cyan-300/20"
