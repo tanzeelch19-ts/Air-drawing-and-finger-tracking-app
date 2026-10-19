@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useHandTracker } from '@/hooks/useHandTracker';
 import { useStrokes } from '@/hooks/useStrokes';
 import { useRecorder } from '@/hooks/useRecorder';
-import { createHandReader, pinchRatio, pointsFor } from '@/lib/hand';
+import { createHandReader, pinchRatio, pointsFor, setFrameAspect } from '@/lib/hand';
+import { coverMap } from '@/lib/cover';
 import { OneEuroFilter } from '@/lib/oneEuro';
 import { createGestureStabilizer } from '@/lib/stabilizer';
 import {
@@ -27,6 +28,7 @@ import { Toolbar } from './Toolbar';
 import { FilterBar } from './FilterBar';
 import { ModePanel } from './ModePanel';
 import { ZoomPanel } from './ZoomPanel';
+import { MobileTray } from './MobileTray';
 import { SymmetryGuides } from './SymmetryGuides';
 
 // ---------- Tuning: yahan se behtari kar sakte hain ----------
@@ -43,7 +45,9 @@ const PRESETS = {
 };
 const FILTER = PRESETS[PRESET];
 
-const COMPACT_BELOW = 720; // stage is se chhota ho to panels neeche chale jate hain (touch ke liye)
+const PHONE_QUERY = '(max-width: 639px)'; // is se patli screen = phone: stage poori screen ka
+const COMPACT_BELOW = 720; // stage is se chhota ho to panels tray mein chale jate hain
+const ASPECT_DRIFT = 0.06; // aspect mein itna chhota farq ho to drawing dobara nahi banti
 const EASE_MS = 16; // cursor aur skeleton screen ke refresh rate par kitna naram chalein (0 = band)
 const GLOW = true; // lines ki chamak. Computer ya phone dheera ho to false karein.
 
@@ -70,6 +74,18 @@ const SHAPE_LABEL = {
   quad: 'Chaar kone',
 };
 
+const GUIDE = [
+  { icon: '☝️', title: 'Koi bhi ek ungli', text: '(index, middle, ring ya pinky): ek line' },
+  { icon: '✌️', title: 'Koi bhi do ungliyan', text: 'do lines, har ungli ki apni' },
+  { icon: '👆', title: 'Button par', text: 'ungli 0.7 second rakhein: wo dab jayega' },
+  { icon: '🖐️', title: 'Khuli hatheli', text: '(chaaron ungliyan): eraser' },
+  { icon: '👌', title: 'Pinch', text: '(baaqi teen ungliyan upar): faasla = brush size' },
+  { icon: '✊', title: 'Muthi ya teen ungliyan', text: 'ruk jao' },
+  { icon: '🔷', title: 'Shapes On', text: 'gola, square, triangle, seedhi line perfect ho jati hai' },
+  { icon: '🦴', title: 'Skeleton aur Rang', text: 'Rang Off karein to sirf haath dikhta hai' },
+  { icon: '🔍', title: 'Zoom', text: 'slider par ungli phirayein to zoom, minimap par phirayein to hissa badalta hai' },
+];
+
 // Har point ka apna smooth filter (x aur y alag).
 const makePointer = (config = FILTER) => ({
   x: new OneEuroFilter(config),
@@ -90,19 +106,22 @@ const inBox = (b, x, y) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
 
 const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
 
-// Shuru ka andaza: phone seedha ho to tall (portrait), warna wide. Camera aane par asal naap lag jata hai.
+// Shuru ka andaza: phone par screen jaisa tall, warna wide. Camera aane par asal naap lag jata hai.
 function guessSize() {
-  const phonePortrait =
-    window.matchMedia('(pointer: coarse)').matches &&
-    window.matchMedia('(orientation: portrait)').matches;
-  const next = sizeForAspect(phonePortrait ? 9 / 16 : 16 / 9);
+  const phone = window.matchMedia(PHONE_QUERY).matches;
+  const next = sizeForAspect(phone ? window.innerWidth / window.innerHeight : 16 / 9);
   setCanvasSize(next.width, next.height);
   return next;
 }
 
 export function AirCanvas() {
-  // Drawing ka naap (camera ke aspect ke mutabiq). Badalne par canvases dobara banti hain.
+  // Drawing ka naap. Phone par screen ke aspect ka, warna camera ke aspect ka.
   const [canvasDims, setCanvasDims] = useState(guessSize);
+  const [phone, setPhone] = useState(() => window.matchMedia(PHONE_QUERY).matches);
+
+  const phoneRef = useRef(phone);
+  phoneRef.current = phone;
+  const frameAspectRef = useRef(16 / 9); // camera ke frame ka asli aspect
 
   const fullRef = useRef(null); // fullscreen wala dabba
   const stageRef = useRef(null);
@@ -162,7 +181,8 @@ export function AirCanvas() {
   const [shapes, setShapes] = useState(false);
   const [toast, setToast] = useState(null);
   const [stats, setStats] = useState({ fps: 0, ms: 0 });
-  const [compact, setCompact] = useState(false); // chhoti screen: panels stage ke neeche
+  const [tray, setTray] = useState(false); // chhota stage: panels neeche ki tray mein
+  const [sheetOpen, setSheetOpen] = useState(false); // tray ki sheet khuli hai?
   const [fullscreen, setFullscreen] = useState(false);
 
   const recorder = useRecorder((ctx) =>
@@ -182,23 +202,33 @@ export function AirCanvas() {
   function measure() {
     const stage = stageRef.current;
     if (!stage) return;
+
     const s = stage.getBoundingClientRect();
-    const box = (el) => {
-      const r = el.getBoundingClientRect();
-      return { el, x0: r.left - s.left, y0: r.top - s.top, x1: r.right - s.left, y1: r.bottom - s.top };
-    };
+    const rel = (r) => ({ x0: r.left - s.left, y0: r.top - s.top, x1: r.right - s.left, y1: r.bottom - s.top });
+
+    // Scroll hone wali sheet: jo buttons uske bahar scroll ho gaye, unhein ungli se dabne nahi dete.
+    const clipEl = stage.querySelector('[data-clip]');
+    const clip = clipEl ? rel(clipEl.getBoundingClientRect()) : null;
+
+    const boxes = (selector) =>
+      [...stage.querySelectorAll(selector)]
+        .map((el) => ({ el, ...rel(el.getBoundingClientRect()) }))
+        .filter((b) => !clip || !clipEl.contains(b.el) || (b.y1 > clip.y0 && b.y0 < clip.y1));
+
     layout.current = {
       width: s.width,
       height: s.height,
-      ui: [...stage.querySelectorAll('[data-ui]')].map(box),
-      controls: [...stage.querySelectorAll('[data-gesture-id]')].map(box),
-      sliders: [...stage.querySelectorAll('[data-slider]')].map(box),
+      ui: boxes('[data-ui]'),
+      controls: boxes('[data-gesture-id]'),
+      sliders: boxes('[data-slider]'),
     };
 
-    // Chhoti screen (jaise phone portrait): panels stage ke neeche chale jate hain.
-    // Fullscreen mein hamesha stage ke andar, taake ungli se control ho.
-    const small = s.width < COMPACT_BELOW && !document.fullscreenElement;
-    setCompact((prev) => (prev === small ? prev : small));
+    // Chhota stage: panels tray mein chale jate hain.
+    const small = s.width < COMPACT_BELOW;
+    setTray((prev) => (prev === small ? prev : small));
+
+    // Phone par drawing ka naap stage (screen) jaisa rakhte hain.
+    if (phoneRef.current && s.width && s.height) applyAspect(s.width / s.height);
   }
 
   // ctx par zoom laga kar draw karta hai.
@@ -238,12 +268,12 @@ export function AirCanvas() {
     toastTimer.current = setTimeout(() => setToast(null), 1400);
   }
 
-  // ---------- camera ka asli naap ----------
-  // Camera ka frame portrait ho ya landscape, stage aur drawing usi naap ki ban jati hai,
-  // is liye koi hissa katta nahi aur haath ki jagah bilkul sahi rehti hai.
+  // ---------- drawing ka naap ----------
+  // aspect = stage ka (phone par) ya camera ka (baaqi jagah) chaurai / ooncha'i.
   function applyAspect(aspect) {
     const next = sizeForAspect(aspect);
-    if (next.width === WIDTH && next.height === HEIGHT) return;
+    const current = WIDTH / HEIGHT;
+    if (Math.abs(next.width / next.height - current) / current < ASPECT_DRIFT) return; // chhota farq
 
     endStroke(); // chalti line pehle khatam
 
@@ -310,7 +340,7 @@ export function AirCanvas() {
   }
 
   // ---------- drawing ----------
-  // points = har seedhi ungli ka ek point. 'double' mein do points = do lines.
+  // points = har seedhi ungli ka ek point (stage ke hisaab se, 0 se 1). 'double' mein do points = do lines.
   function paint(ctx, kind, points) {
     const v = viewRef.current;
     const erasing = kind === 'erase';
@@ -415,6 +445,7 @@ export function AirCanvas() {
     if (progress >= 1) {
       d.fired = true; // jab tak ungli hat na jaye, dobara nahi chalega
       target.click();
+      navigator.vibrate?.(12); // Android par halka sa vibrate
       setHover({ id, progress: 1 });
       return;
     }
@@ -423,12 +454,11 @@ export function AirCanvas() {
     setHover((prev) => (prev.id === id && prev.progress === step ? prev : { id, progress: step }));
   }
 
-  // Skeleton ke 21 points ko smooth karta hai, taake hologram kaanpe nahi.
-  function smoothHand(hand, t) {
-    return hand.map((p, i) => ({
-      x: tools.skeleton[i].x.filter(p.x, t),
-      y: tools.skeleton[i].y.filter(p.y, t),
-    }));
+  // Skeleton ke 21 points ko smooth karta hai (taake hologram kaanpe nahi) aur stage ke hisaab se badalta hai.
+  function smoothHand(hand, t, toStage) {
+    return hand.map((p, i) =>
+      toStage({ x: tools.skeleton[i].x.filter(p.x, t), y: tools.skeleton[i].y.filter(p.y, t) }),
+    );
   }
 
   // ---------- har camera frame par haath ka result ----------
@@ -477,8 +507,13 @@ export function AirCanvas() {
 
     const t = now / 1000;
 
+    // Camera ke frame ka point -> stage ka point. Phone par frame kat'ta hai (cover), is liye ye zaroori hai.
+    const videoAspect = frameAspectRef.current;
+    const stageAspect = height ? width / height : videoAspect;
+    const toStage = (p) => coverMap(p, videoAspect, stageAspect);
+
     // 0) Hologram skeleton (screen par naram chalna display loop ka kaam hai)
-    d.skeleton = skeletonRef.current ? smoothHand(hand, t) : null;
+    d.skeleton = skeletonRef.current ? smoothHand(hand, t, toStage) : null;
 
     // 1) Haath padhna: kitni aur kaun si ungliyan seedhi hain. Phir debounce:
     //    gesture (ya ungli) tabhi badle jab kai frames tak same rahe.
@@ -489,11 +524,13 @@ export function AirCanvas() {
     const [stable, fingerList] = stableKey.split('|');
     const fingers = fingerList ? fingerList.split(',').map(Number) : [0];
 
-    // 2) One Euro filter: har seedhi ungli ka apna smooth point.
-    const points = pointsFor(hand, stable, fingers).map((raw, i) => ({
-      x: tools.pointers[i].x.filter(raw.x, t),
-      y: tools.pointers[i].y.filter(raw.y, t),
-    }));
+    // 2) One Euro filter (camera ke frame mein), phir stage ke hisaab se: har seedhi ungli ka apna point.
+    const points = pointsFor(hand, stable, fingers).map((raw, i) =>
+      toStage({
+        x: tools.pointers[i].x.filter(raw.x, t),
+        y: tools.pointers[i].y.filter(raw.y, t),
+      }),
+    );
     const primary = points[0];
 
     // Stage ke andar ungli ki jagah (pixels mein). Video mirror hai, is liye x ulta.
@@ -533,13 +570,66 @@ export function AirCanvas() {
 
   const { status, error } = useHandTracker(videoRef, handleResults);
 
+  // ---------- effects ----------
+
+  // Phone hai ya nahi (screen ki chaurai se)
+  useEffect(() => {
+    const mq = window.matchMedia(PHONE_QUERY);
+    const onChange = () => setPhone(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  // Phone par page scroll aur pull-to-refresh band.
+  useEffect(() => {
+    if (!phone) return undefined;
+    const prev = document.body.style.overscrollBehavior;
+    document.body.style.overscrollBehavior = 'none';
+    return () => {
+      document.body.style.overscrollBehavior = prev;
+    };
+  }, [phone]);
+
+  // Drawing mein screen ko chhoote nahi, to phone screen band kar deta hai aur camera ruk jata hai.
+  // Wake Lock se screen jagi rehti hai.
+  useEffect(() => {
+    if (status !== 'ready' || !('wakeLock' in navigator)) return undefined;
+
+    let lock = null;
+    let cancelled = false;
+
+    const request = async () => {
+      try {
+        const next = await navigator.wakeLock.request('screen');
+        if (cancelled) next.release().catch(() => {});
+        else lock = next;
+      } catch {
+        /* browser ne mana kar diya */
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') request();
+    };
+
+    request();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      if (lock) lock.release().catch(() => {});
+    };
+  }, [status]);
+
   // Camera ka asli naap dekhna: shuru mein aur jab phone ghumane se frame badle.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return undefined;
 
     const update = () => {
-      if (video.videoWidth && video.videoHeight) applyAspect(video.videoWidth / video.videoHeight);
+      if (!video.videoWidth || !video.videoHeight) return;
+      frameAspectRef.current = video.videoWidth / video.videoHeight;
+      setFrameAspect(frameAspectRef.current);
+      if (!phoneRef.current) applyAspect(frameAspectRef.current); // phone par stage screen jaisa hi rehta hai
     };
 
     update();
@@ -557,7 +647,13 @@ export function AirCanvas() {
     measure();
   }, [canvasDims]);
 
-  // UI naapna: shuru mein, jab size badle, aur jab panels jagah badlein (compact badalne par).
+  // Phone se bahar aane par drawing ka naap camera ke aspect par wapas.
+  useLayoutEffect(() => {
+    measure();
+    if (!phone) applyAspect(frameAspectRef.current);
+  }, [phone]);
+
+  // UI naapna: shuru mein, jab size badle, aur jab panels jagah badlein (tray ya sheet badalne par).
   useLayoutEffect(() => {
     const stage = stageRef.current;
     if (!stage) return undefined;
@@ -572,7 +668,7 @@ export function AirCanvas() {
       observer.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [compact]);
+  }, [tray, sheetOpen]);
 
   // Fullscreen ki halat par nazar
   useEffect(() => {
@@ -796,7 +892,7 @@ export function AirCanvas() {
   const cursorStyle = hover.id ? CURSOR_STYLE.select : CURSOR_STYLE[mode];
 
   // ---------- panels ----------
-  // Ek hi panels do jagah dikh sakte hain: stage ke andar (ungli se) ya neeche (touch se).
+  // docked = true: tray ki sheet ke andar (seedhi tarteeb), warna stage ke upar tairte hue (desktop).
   const toolbar = (
     <Toolbar
       colors={PALETTE}
@@ -809,7 +905,7 @@ export function AirCanvas() {
       canRedo={store.canRedo}
       recording={recorder.recording}
       canRecord={recorder.supported}
-      docked={compact}
+      docked={tray}
       onColorChange={pickColor}
       onSymmetry={handleSymmetry}
       onUndo={handleUndo}
@@ -825,7 +921,7 @@ export function AirCanvas() {
       ink={ink}
       shapes={shapes}
       hover={hover}
-      docked={compact}
+      docked={tray}
       onSkeleton={toggleSkeleton}
       onInk={toggleInk}
       onShapes={toggleShapes}
@@ -835,36 +931,54 @@ export function AirCanvas() {
     <ZoomPanel
       view={view}
       hover={hover}
-      docked={compact}
+      docked={tray}
       onReset={() => handleZoom(0)}
       onSlide={handleSlide}
     />
   );
   const filters = (
-    <FilterBar filters={FILTERS} value={filter} hover={hover} docked={compact} onChange={setFilter} />
+    <FilterBar filters={FILTERS} value={filter} hover={hover} docked={tray} onChange={setFilter} />
   );
 
   const canFullscreen = typeof document !== 'undefined' && document.fullscreenEnabled;
+  const fullscreenButton = canFullscreen && (
+    <button
+      type="button"
+      onClick={toggleFullscreen}
+      className="cursor-pointer touch-manipulation rounded-lg border border-ink-700 bg-ink-900 px-3 py-1.5 text-xs font-medium text-ink-100"
+    >
+      {fullscreen ? 'Fullscreen band karein' : 'Fullscreen'}
+    </button>
+  );
+  const statsText = `Tracking: ${stats.fps} fps · detection ${stats.ms} ms · frame ${canvasDims.width}×${canvasDims.height}`;
 
-  // Stage ka aspect camera ke aspect jaisa (portrait mein tall, landscape mein wide).
+  // Phone par stage poori screen ka (svh = address bar ke bina wali stable ooncha'i),
+  // warna camera ke aspect ka aur screen mein fit.
   const aspect = canvasDims.width / canvasDims.height;
+  const stageStyle = phone
+    ? { width: '100%', height: '100%' }
+    : {
+        width: `min(100%, calc((100dvh - 1rem) * ${aspect}))`,
+        aspectRatio: `${canvasDims.width} / ${canvasDims.height}`,
+      };
 
   return (
     <div
-      className="mx-auto max-w-5xl px-3 py-4 sm:px-4 sm:py-6"
-      style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
+      className={phone ? 'fixed inset-0 h-svh overflow-hidden bg-black' : 'mx-auto max-w-5xl px-3 py-4 sm:px-4 sm:py-6'}
+      style={phone ? undefined : { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
     >
-      {/* Fullscreen mein sirf ye dabba aata hai; stage beech mein apne aspect mein hi rehta hai */}
-      <div ref={fullRef} className="flex items-center justify-center [&:fullscreen]:bg-black">
+      {/* Fullscreen mein sirf ye dabba aata hai */}
+      <div
+        ref={fullRef}
+        className={phone ? 'h-full w-full bg-black' : 'flex items-center justify-center [&:fullscreen]:bg-black'}
+      >
         <div
           ref={stageRef}
-          style={{
-            width: `min(100%, calc((100dvh - 1rem) * ${aspect}))`,
-            aspectRatio: `${canvasDims.width} / ${canvasDims.height}`,
-          }}
-          className="@container relative select-none overflow-hidden rounded-2xl bg-black"
+          style={stageStyle}
+          className={`@container relative select-none overflow-hidden bg-black ${phone ? '' : 'rounded-2xl'}`}
         >
-          {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte. */}
+          {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte.
+              object-cover: video stage ko poora bharti hai (phone par kinaron se katti hai). */}
           <video
             ref={videoRef}
             playsInline
@@ -894,8 +1008,50 @@ export function AirCanvas() {
 
           <SymmetryGuides mode={symmetry} view={view} />
 
-          {/* Bari screen ya fullscreen: panels stage ke andar, ungli se control */}
-          {!compact && (
+          {tray ? (
+            // Chhota stage (phone): neeche patti, aur Tools dabane par sheet
+            <MobileTray
+              open={sheetOpen}
+              mode={mode}
+              hover={hover}
+              canUndo={store.canUndo}
+              canRedo={store.canRedo}
+              recording={recorder.recording}
+              canRecord={recorder.supported}
+              onToggle={() => setSheetOpen((open) => !open)}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              onRecord={recorder.toggle}
+              onLayout={measure}
+            >
+              {toolbar}
+              <div className="flex flex-wrap items-start gap-3">
+                {modes}
+                {zoom}
+              </div>
+              {filters}
+
+              {phone && (
+                <div className="flex flex-col gap-2 rounded-xl bg-black/55 p-2 text-xs text-ink-400">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span>{statsText}</span>
+                    {fullscreenButton}
+                  </div>
+                  <details>
+                    <summary className="cursor-pointer text-ink-100">Gesture guide</summary>
+                    <ul className="mt-2 flex flex-col gap-1.5">
+                      {GUIDE.map((g) => (
+                        <li key={g.title}>
+                          {g.icon} <b className="text-ink-100">{g.title}</b> {g.text}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                </div>
+              )}
+            </MobileTray>
+          ) : (
+            // Bara stage (desktop ya tablet): panels stage ke andar tairte hain, ungli se control
             <>
               <div data-ui className="absolute inset-x-0 top-0 z-10">
                 {toolbar}
@@ -907,7 +1063,10 @@ export function AirCanvas() {
           )}
 
           {toast && (
-            <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100 @max-3xl:bottom-16 @max-3xl:text-xs">
+            <div
+              className="pointer-events-none absolute left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100 @max-3xl:text-xs"
+              style={{ bottom: tray ? '5.5rem' : '6rem' }}
+            >
               {toast}
             </div>
           )}
@@ -932,67 +1091,23 @@ export function AirCanvas() {
         </div>
       </div>
 
-      {/* Chhoti screen: panels stage ke neeche, touch se */}
-      {compact && (
-        <div className="mt-3 flex flex-col gap-3">
-          <p className="text-xs text-ink-400">
-            Phone ko landscape mein ghumayein ya Fullscreen dabayein, to ye sab ungli se hi control honge.
-          </p>
-          {toolbar}
-          <div className="flex flex-wrap items-start gap-3">
-            {modes}
-            {zoom}
+      {/* Phone par ye sab Tools sheet ke andar hai. Baaqi jagah stage ke neeche. */}
+      {!phone && (
+        <>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-ink-400">{statsText}</p>
+            {fullscreenButton}
           </div>
-          {filters}
-        </div>
+
+          <div className="mt-4 grid gap-3 text-xs text-ink-400 sm:grid-cols-2 sm:text-sm lg:grid-cols-3">
+            {GUIDE.map((g) => (
+              <p key={g.title} className="rounded-xl bg-ink-900 p-3">
+                {g.icon} <b className="text-ink-100">{g.title}</b> {g.text}
+              </p>
+            ))}
+          </div>
+        </>
       )}
-
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-ink-400">
-          Tracking: {stats.fps} fps · detection {stats.ms} ms · frame {canvasDims.width}×{canvasDims.height}
-        </p>
-        {canFullscreen && (
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            className="cursor-pointer touch-manipulation rounded-lg border border-ink-700 bg-ink-900 px-3 py-1.5 text-xs font-medium text-ink-100"
-          >
-            {fullscreen ? 'Fullscreen band karein' : 'Fullscreen'}
-          </button>
-        )}
-      </div>
-
-      <div className="mt-4 grid gap-3 text-xs text-ink-400 sm:grid-cols-2 sm:text-sm lg:grid-cols-3">
-        <p className="rounded-xl bg-ink-900 p-3">
-          ☝️ <b className="text-ink-100">Koi bhi ek ungli</b> (index, middle, ring ya pinky): ek line
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          ✌️ <b className="text-ink-100">Koi bhi do ungliyan</b>: do lines, har ungli ki apni
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          👆 <b className="text-ink-100">Button par</b> ungli 0.7 second rakhein: wo dab jayega
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          🖐️ <b className="text-ink-100">Khuli hatheli</b> (chaaron ungliyan): eraser
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          👌 <b className="text-ink-100">Pinch</b> (baaqi teen ungliyan upar): faasla = brush size
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          ✊ <b className="text-ink-100">Muthi ya teen ungliyan</b>: ruk jao
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          🔷 <b className="text-ink-100">Shapes On</b>: gola, square, triangle, seedhi line perfect ho jati hai
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          🦴 <b className="text-ink-100">Skeleton</b> aur <b className="text-ink-100">Rang</b>: Rang Off karein
-          to sirf haath dikhta hai
-        </p>
-        <p className="rounded-xl bg-ink-900 p-3">
-          🔍 <b className="text-ink-100">Zoom panel</b>: slider par ungli phirayein to zoom, minimap par
-          phirayein to drawing ka hissa badalta hai
-        </p>
-      </div>
     </div>
   );
 }

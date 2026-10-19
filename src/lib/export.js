@@ -1,6 +1,18 @@
 import { WIDTH, HEIGHT } from './strokes';
 import { DIM } from './filters';
 
+// Video ko stage ki tarah "cover" mein banata hai: frame ka beech wala hissa, jo screen par dikhta hai.
+function drawCover(ctx, video, width, height) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return;
+
+  const scale = Math.max(width / vw, height / vh);
+  const sw = width / scale;
+  const sh = height / scale;
+  ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, width, height);
+}
+
 // Screen par jo dikhta hai wahi file mein jata hai (mirror, filter, glow aur skeleton ke saath).
 // withVideo = true: camera ki video bhi (recording ke liye)
 // withVideo = false: sirf drawing, dark background par (PNG ke liye)
@@ -19,7 +31,7 @@ export function composeFrame(
 
   if (withVideo && video && video.readyState >= 2) {
     ctx.filter = filter;
-    ctx.drawImage(video, 0, 0, WIDTH, HEIGHT);
+    drawCover(ctx, video, WIDTH, HEIGHT);
     ctx.filter = 'none';
   }
 
