@@ -6,19 +6,23 @@ const WASM_URL =
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-// Camera ka size: lambi aur chhoti side. Chhota frame = tez detection.
+// Computer ka camera: 16:9. Chhota frame = tez detection.
 const CAMERA_LONG = 960;
 const CAMERA_SHORT = 540;
 
-// Phone seedha (portrait) pakda ho to camera se tall frame maangte hain, warna wide frame.
-// Asal naap camera khud tay karta hai, app usi ke hisaab se stage banati hai.
+// Phone ka camera: 4:3 (portrait mein 3:4). Ye sensor ka poora frame hota hai, is liye
+// zoom nahi lagta aur sab se chaura angle milta hai. (9:16 maangne par kuch phones crop kar dete hain.)
+const PHONE_LONG = 960;
+const PHONE_SHORT = 720;
+
 function cameraSize() {
-  const phonePortrait =
-    window.matchMedia('(pointer: coarse)').matches &&
-    window.matchMedia('(orientation: portrait)').matches;
-  return phonePortrait
-    ? { width: CAMERA_SHORT, height: CAMERA_LONG }
-    : { width: CAMERA_LONG, height: CAMERA_SHORT };
+  const phone = window.matchMedia('(pointer: coarse)').matches;
+  if (!phone) return { width: CAMERA_LONG, height: CAMERA_SHORT };
+
+  const portrait = window.matchMedia('(orientation: portrait)').matches;
+  return portrait
+    ? { width: PHONE_SHORT, height: PHONE_LONG }
+    : { width: PHONE_LONG, height: PHONE_SHORT };
 }
 
 // Confidence 0.3: haath thoda dhundla ya tez harkat mein ho tab bhi tracking na chhute.

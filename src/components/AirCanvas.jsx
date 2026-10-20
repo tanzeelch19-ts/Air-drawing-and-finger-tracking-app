@@ -45,7 +45,8 @@ const PRESETS = {
 };
 const FILTER = PRESETS[PRESET];
 
-const PHONE_QUERY = '(max-width: 639px)'; // is se patli screen = phone: stage poori screen ka
+const PHONE_QUERY = '(max-width: 639px)'; // is se patli screen = phone
+const QUICK_BAR = '3.75rem'; // phone par neeche ki patti ki ooncha'i
 const COMPACT_BELOW = 720; // stage is se chhota ho to panels tray mein chale jate hain
 const ASPECT_DRIFT = 0.06; // aspect mein itna chhota farq ho to drawing dobara nahi banti
 const EASE_MS = 16; // cursor aur skeleton screen ke refresh rate par kitna naram chalein (0 = band)
@@ -106,22 +107,22 @@ const inBox = (b, x, y) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
 
 const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
 
-// Shuru ka andaza: phone par screen jaisa tall, warna wide. Camera aane par asal naap lag jata hai.
+// Shuru ka andaza (camera aane se pehle): phone par 3:4 ya 4:3, warna 16:9.
+// Camera ka asli frame aate hi stage uske naap ka ho jata hai.
 function guessSize() {
-  const phone = window.matchMedia(PHONE_QUERY).matches;
-  const next = sizeForAspect(phone ? window.innerWidth / window.innerHeight : 16 / 9);
+  const touch = window.matchMedia('(pointer: coarse)').matches;
+  const portrait = window.matchMedia('(orientation: portrait)').matches;
+  const next = sizeForAspect(touch ? (portrait ? 3 / 4 : 4 / 3) : 16 / 9);
   setCanvasSize(next.width, next.height);
   return next;
 }
 
 export function AirCanvas() {
-  // Drawing ka naap. Phone par screen ke aspect ka, warna camera ke aspect ka.
+  // Drawing ka naap: hamesha camera ke frame ke aspect ka, taake kuch kate nahi aur zoom na lage.
   const [canvasDims, setCanvasDims] = useState(guessSize);
   const [phone, setPhone] = useState(() => window.matchMedia(PHONE_QUERY).matches);
 
-  const phoneRef = useRef(phone);
-  phoneRef.current = phone;
-  const frameAspectRef = useRef(16 / 9); // camera ke frame ka asli aspect
+  const frameAspectRef = useRef(canvasDims.width / canvasDims.height); // camera ke frame ka asli aspect
 
   const fullRef = useRef(null); // fullscreen wala dabba
   const stageRef = useRef(null);
@@ -181,9 +182,15 @@ export function AirCanvas() {
   const [shapes, setShapes] = useState(false);
   const [toast, setToast] = useState(null);
   const [stats, setStats] = useState({ fps: 0, ms: 0 });
-  const [tray, setTray] = useState(false); // chhota stage: panels neeche ki tray mein
+  const [tray, setTray] = useState(false); // chhota stage: panels tray mein
   const [sheetOpen, setSheetOpen] = useState(false); // tray ki sheet khuli hai?
   const [fullscreen, setFullscreen] = useState(false);
+
+  // Tray kahan dikhe:
+  //   phone par = stage ke neeche, screen ki patti par (touch se)
+  //   fullscreen ya chhoti window = stage ke andar (ungli aur touch dono se)
+  const trayInside = tray && (!phone || fullscreen);
+  const trayOutside = tray && phone && !fullscreen;
 
   const recorder = useRecorder((ctx) =>
     composeFrame(ctx, {
@@ -226,9 +233,6 @@ export function AirCanvas() {
     // Chhota stage: panels tray mein chale jate hain.
     const small = s.width < COMPACT_BELOW;
     setTray((prev) => (prev === small ? prev : small));
-
-    // Phone par drawing ka naap stage (screen) jaisa rakhte hain.
-    if (phoneRef.current && s.width && s.height) applyAspect(s.width / s.height);
   }
 
   // ctx par zoom laga kar draw karta hai.
@@ -269,7 +273,7 @@ export function AirCanvas() {
   }
 
   // ---------- drawing ka naap ----------
-  // aspect = stage ka (phone par) ya camera ka (baaqi jagah) chaurai / ooncha'i.
+  // aspect = camera ke frame ka chaurai / ooncha'i. Stage aur drawing usi naap ke banate hain.
   function applyAspect(aspect) {
     const next = sizeForAspect(aspect);
     const current = WIDTH / HEIGHT;
@@ -507,7 +511,8 @@ export function AirCanvas() {
 
     const t = now / 1000;
 
-    // Camera ke frame ka point -> stage ka point. Phone par frame kat'ta hai (cover), is liye ye zaroori hai.
+    // Camera ke frame ka point -> stage ka point. Stage camera ke aspect ka hai, is liye ye lagbhag
+    // seedha hai (sirf chhote farq theek karta hai).
     const videoAspect = frameAspectRef.current;
     const stageAspect = height ? width / height : videoAspect;
     const toStage = (p) => coverMap(p, videoAspect, stageAspect);
@@ -629,7 +634,7 @@ export function AirCanvas() {
       if (!video.videoWidth || !video.videoHeight) return;
       frameAspectRef.current = video.videoWidth / video.videoHeight;
       setFrameAspect(frameAspectRef.current);
-      if (!phoneRef.current) applyAspect(frameAspectRef.current); // phone par stage screen jaisa hi rehta hai
+      applyAspect(frameAspectRef.current);
     };
 
     update();
@@ -647,12 +652,6 @@ export function AirCanvas() {
     measure();
   }, [canvasDims]);
 
-  // Phone se bahar aane par drawing ka naap camera ke aspect par wapas.
-  useLayoutEffect(() => {
-    measure();
-    if (!phone) applyAspect(frameAspectRef.current);
-  }, [phone]);
-
   // UI naapna: shuru mein, jab size badle, aur jab panels jagah badlein (tray ya sheet badalne par).
   useLayoutEffect(() => {
     const stage = stageRef.current;
@@ -668,7 +667,7 @@ export function AirCanvas() {
       observer.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [tray, sheetOpen]);
+  }, [tray, sheetOpen, trayInside]);
 
   // Fullscreen ki halat par nazar
   useEffect(() => {
@@ -952,33 +951,84 @@ export function AirCanvas() {
   );
   const statsText = `Tracking: ${stats.fps} fps · detection ${stats.ms} ms · frame ${canvasDims.width}×${canvasDims.height}`;
 
-  // Phone par stage poori screen ka (svh = address bar ke bina wali stable ooncha'i),
-  // warna camera ke aspect ka aur screen mein fit.
+  // Tray: neeche ki patti (hamesha) aur Tools dabane par sheet.
+  const trayEl = tray ? (
+    <MobileTray
+      open={sheetOpen}
+      mode={mode}
+      hover={hover}
+      canUndo={store.canUndo}
+      canRedo={store.canRedo}
+      recording={recorder.recording}
+      canRecord={recorder.supported}
+      onToggle={() => setSheetOpen((open) => !open)}
+      onUndo={handleUndo}
+      onRedo={handleRedo}
+      onRecord={recorder.toggle}
+      onLayout={measure}
+    >
+      {toolbar}
+      <div className="flex flex-wrap items-start gap-3">
+        {modes}
+        {zoom}
+      </div>
+      {filters}
+
+      {phone && (
+        <div className="flex flex-col gap-2 rounded-xl bg-black/55 p-2 text-xs text-ink-400">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>{statsText}</span>
+            {fullscreenButton}
+          </div>
+          <details>
+            <summary className="cursor-pointer text-ink-100">Gesture guide</summary>
+            <ul className="mt-2 flex flex-col gap-1.5">
+              {GUIDE.map((g) => (
+                <li key={g.title}>
+                  {g.icon} <b className="text-ink-100">{g.title}</b> {g.text}
+                </li>
+              ))}
+            </ul>
+          </details>
+        </div>
+      )}
+    </MobileTray>
+  ) : null;
+
+  // Stage hamesha camera ke frame ke aspect ka: poora frame dikhta hai, kuch katta nahi, zoom nahi lagta.
+  // Phone par jitni jagah screen par bachti hai (neeche ki patti ke upar), usmein fit hota hai.
   const aspect = canvasDims.width / canvasDims.height;
-  const stageStyle = phone
-    ? { width: '100%', height: '100%' }
-    : {
-        width: `min(100%, calc((100dvh - 1rem) * ${aspect}))`,
-        aspectRatio: `${canvasDims.width} / ${canvasDims.height}`,
-      };
+  const availableHeight = phone
+    ? fullscreen
+      ? '100svh'
+      : `(100svh - ${QUICK_BAR} - env(safe-area-inset-bottom))`
+    : '(100dvh - 1rem)';
+  const stageStyle = {
+    width: `min(100%, calc(${availableHeight} * ${aspect}))`,
+    aspectRatio: `${canvasDims.width} / ${canvasDims.height}`,
+  };
 
   return (
     <div
       className={phone ? 'fixed inset-0 h-svh overflow-hidden bg-black' : 'mx-auto max-w-5xl px-3 py-4 sm:px-4 sm:py-6'}
       style={phone ? undefined : { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
     >
-      {/* Fullscreen mein sirf ye dabba aata hai */}
+      {/* Fullscreen mein sirf ye dabba aata hai. Phone par ye neeche ki patti ke upar ki saari jagah leta hai. */}
       <div
         ref={fullRef}
-        className={phone ? 'h-full w-full bg-black' : 'flex items-center justify-center [&:fullscreen]:bg-black'}
+        className={
+          phone
+            ? 'absolute inset-x-0 top-0 flex items-center justify-center bg-black'
+            : 'flex items-center justify-center [&:fullscreen]:bg-black'
+        }
+        style={phone ? { bottom: `calc(${QUICK_BAR} + env(safe-area-inset-bottom))` } : undefined}
       >
         <div
           ref={stageRef}
           style={stageStyle}
           className={`@container relative select-none overflow-hidden bg-black ${phone ? '' : 'rounded-2xl'}`}
         >
-          {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte.
-              object-cover: video stage ko poora bharti hai (phone par kinaron se katti hai). */}
+          {/* Filter sirf video par lagta hai. Canvas (lines) alag hai, is liye uske rang nahi badalte. */}
           <video
             ref={videoRef}
             playsInline
@@ -1009,47 +1059,8 @@ export function AirCanvas() {
           <SymmetryGuides mode={symmetry} view={view} />
 
           {tray ? (
-            // Chhota stage (phone): neeche patti, aur Tools dabane par sheet
-            <MobileTray
-              open={sheetOpen}
-              mode={mode}
-              hover={hover}
-              canUndo={store.canUndo}
-              canRedo={store.canRedo}
-              recording={recorder.recording}
-              canRecord={recorder.supported}
-              onToggle={() => setSheetOpen((open) => !open)}
-              onUndo={handleUndo}
-              onRedo={handleRedo}
-              onRecord={recorder.toggle}
-              onLayout={measure}
-            >
-              {toolbar}
-              <div className="flex flex-wrap items-start gap-3">
-                {modes}
-                {zoom}
-              </div>
-              {filters}
-
-              {phone && (
-                <div className="flex flex-col gap-2 rounded-xl bg-black/55 p-2 text-xs text-ink-400">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span>{statsText}</span>
-                    {fullscreenButton}
-                  </div>
-                  <details>
-                    <summary className="cursor-pointer text-ink-100">Gesture guide</summary>
-                    <ul className="mt-2 flex flex-col gap-1.5">
-                      {GUIDE.map((g) => (
-                        <li key={g.title}>
-                          {g.icon} <b className="text-ink-100">{g.title}</b> {g.text}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                </div>
-              )}
-            </MobileTray>
+            // Chhota stage: tray stage ke andar sirf tab, jab wo neeche nahi ja sakti (fullscreen ya chhoti window)
+            trayInside && trayEl
           ) : (
             // Bara stage (desktop ya tablet): panels stage ke andar tairte hain, ungli se control
             <>
@@ -1065,7 +1076,7 @@ export function AirCanvas() {
           {toast && (
             <div
               className="pointer-events-none absolute left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100 @max-3xl:text-xs"
-              style={{ bottom: tray ? '5.5rem' : '6rem' }}
+              style={{ bottom: trayInside ? '5.5rem' : phone ? '1rem' : '6rem' }}
             >
               {toast}
             </div>
@@ -1090,6 +1101,9 @@ export function AirCanvas() {
           )}
         </div>
       </div>
+
+      {/* Phone par tray screen ke neeche chipki hoti hai (stage ke bahar) */}
+      {trayOutside && trayEl}
 
       {/* Phone par ye sab Tools sheet ke andar hai. Baaqi jagah stage ke neeche. */}
       {!phone && (
