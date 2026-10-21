@@ -33,31 +33,50 @@ import { SymmetryGuides } from './SymmetryGuides';
 
 // ---------- Tuning: yahan se behtari kar sakte hain ----------
 
-// Tracking ka mizaj:
-//   'smooth'   = zyada saaf line, thoda dheera
-//   'balanced' = beech ka (default)
-//   'fast'     = bilkul tez, thodi larzish
-const PRESET = 'balanced';
+// Touch screen (phone ya tablet) hai? Is par halka graphics aur tez tracking default hoti hai.
+const TOUCH = window.matchMedia('(pointer: coarse)').matches;
+
+// Ungli ke peeche chalne ki raftaar. App ke andar "Speed" button se badalti hai, aur yaad rehti hai.
+//   smooth   = zyada saaf line, thoda dheera
+//   balanced = beech ka
+//   fast     = ungli ke saath saath, thodi larzish
+const SPEED_KEY = 'airdraw:speed';
+const SPEEDS = ['smooth', 'balanced', 'fast'];
+const SPEED_LABEL = { smooth: 'Smooth', balanced: 'Balanced', fast: 'Fast' };
 const PRESETS = {
   smooth: { minCutoff: 0.8, beta: 12 },
   balanced: { minCutoff: 1.2, beta: 25 },
   fast: { minCutoff: 2.0, beta: 45 },
 };
-const FILTER = PRESETS[PRESET];
+
+function initialSpeed() {
+  try {
+    const saved = localStorage.getItem(SPEED_KEY);
+    if (saved && PRESETS[saved]) return saved;
+  } catch {
+    /* storage band ho sakti hai */
+  }
+  return TOUCH ? 'fast' : 'balanced'; // phone par pehle se tez
+}
 
 const PHONE_QUERY = '(max-width: 639px)'; // is se patli screen = phone
 const QUICK_BAR = '3.75rem'; // phone par neeche ki patti ki ooncha'i
+const QUICK_BAR_PX = 60;
+const SHEET_AUTO_OPEN = 240; // camera ke neeche itni jagah (px) bache to Tools khud khul jate hain
 const COMPACT_BELOW = 720; // stage is se chhota ho to panels tray mein chale jate hain
 const ASPECT_DRIFT = 0.06; // aspect mein itna chhota farq ho to drawing dobara nahi banti
-const EASE_MS = 16; // cursor aur skeleton screen ke refresh rate par kitna naram chalein (0 = band)
-const GLOW = true; // lines ki chamak. Computer ya phone dheera ho to false karein.
+const EASE_MS = TOUCH ? 10 : 16; // cursor aur skeleton screen ke refresh rate par kitna naram chalein (0 = band)
+const GLOW = !TOUCH; // lines ki chamak. Phone par band (GPU par bhaari). Chahein to true karein.
 
 const SKELETON_FILTER = { minCutoff: 2.0, beta: 12 }; // skeleton ke 21 points ke liye
 const PINCH_FILTER = { minCutoff: 1.2, beta: 6 }; // pinch ke faasle ke liye
-const ENTER_FRAMES = 3; // kisi gesture mein jane ke liye itne frames
-const EXIT_FRAMES = { draw: 6, double: 6, erase: 5, size: 4 }; // gesture se nikalne ke liye frames
+
+// Gesture ke liye waqt (milliseconds). Fps kam ho tab bhi ek jaisa jawab.
+const ENTER_MS = 90; // kisi gesture mein jane ke liye
+const EXIT_MS = { draw: 180, double: 180, erase: 150, size: 120 }; // gesture se nikalne ke liye
 const LINK = ['draw', 'double']; // ye dono aapas mein jaldi badalte hain
-const MAX_MISSED = 8; // haath itne frames gum ho to bhi line nahi tootti
+const MAX_LOST_MS = 250; // haath itni der gum ho to bhi line nahi tootti
+
 const DWELL_MS = 700; // button dabane ke liye rukne ka time
 const MIN_STEP = 3; // line mein naya point tab jab ungli itne px hile
 const SIZE_HOLD_FRAMES = 6; // pinch itni der ruke to size lock hoga
@@ -84,11 +103,12 @@ const GUIDE = [
   { icon: '✊', title: 'Muthi ya teen ungliyan', text: 'ruk jao' },
   { icon: '🔷', title: 'Shapes On', text: 'gola, square, triangle, seedhi line perfect ho jati hai' },
   { icon: '🦴', title: 'Skeleton aur Rang', text: 'Rang Off karein to sirf haath dikhta hai' },
+  { icon: '⚡', title: 'Speed', text: 'Smooth, Balanced ya Fast: ungli ke peeche chalne ki raftaar' },
   { icon: '🔍', title: 'Zoom', text: 'slider par ungli phirayein to zoom, minimap par phirayein to hissa badalta hai' },
 ];
 
 // Har point ka apna smooth filter (x aur y alag).
-const makePointer = (config = FILTER) => ({
+const makePointer = (config) => ({
   x: new OneEuroFilter(config),
   y: new OneEuroFilter(config),
 });
@@ -110,9 +130,8 @@ const clamp01 = (v) => Math.min(Math.max(v, 0), 1);
 // Shuru ka andaza (camera aane se pehle): phone par 3:4 ya 4:3, warna 16:9.
 // Camera ka asli frame aate hi stage uske naap ka ho jata hai.
 function guessSize() {
-  const touch = window.matchMedia('(pointer: coarse)').matches;
   const portrait = window.matchMedia('(orientation: portrait)').matches;
-  const next = sizeForAspect(touch ? (portrait ? 3 / 4 : 4 / 3) : 16 / 9);
+  const next = sizeForAspect(TOUCH ? (portrait ? 3 / 4 : 4 / 3) : 16 / 9);
   setCanvasSize(next.width, next.height);
   return next;
 }
@@ -121,10 +140,12 @@ export function AirCanvas() {
   // Drawing ka naap: hamesha camera ke frame ke aspect ka, taake kuch kate nahi aur zoom na lage.
   const [canvasDims, setCanvasDims] = useState(guessSize);
   const [phone, setPhone] = useState(() => window.matchMedia(PHONE_QUERY).matches);
+  const [speed, setSpeed] = useState(initialSpeed);
 
   const frameAspectRef = useRef(canvasDims.width / canvasDims.height); // camera ke frame ka asli aspect
 
-  const fullRef = useRef(null); // fullscreen wala dabba
+  const rootRef = useRef(null); // poora page (phone par fullscreen yehi hota hai)
+  const fullRef = useRef(null); // stage wala dabba (desktop par fullscreen yehi hota hai)
   const stageRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null); // drawing
@@ -134,10 +155,10 @@ export function AirCanvas() {
   const store = useStrokes();
   const [tools] = useState(() => ({
     reader: createHandReader(),
-    pointers: [makePointer(), makePointer()],
+    pointers: [makePointer(PRESETS[speed]), makePointer(PRESETS[speed])],
     skeleton: Array.from({ length: 21 }, () => makePointer(SKELETON_FILTER)),
     pinch: new OneEuroFilter(PINCH_FILTER),
-    stabilizer: createGestureStabilizer({ enter: ENTER_FRAMES, exit: EXIT_FRAMES, link: LINK }),
+    stabilizer: createGestureStabilizer({ enterMs: ENTER_MS, exitMs: EXIT_MS, link: LINK }),
   }));
 
   // Ye values har frame ke handler ko turant chahiye, is liye ref mein bhi rakhte hain.
@@ -152,17 +173,19 @@ export function AirCanvas() {
   const lockUntil = useRef(0);
   const dwell = useRef({ id: null, start: 0, fired: false });
   const lastHand = useRef(null); // pichla haath (gum hone par kaam aata hai)
-  const missed = useRef(0); // kitne frames se haath nahi mila
+  const lastSeen = useRef(0); // haath aakhri baar kab dikha (milliseconds)
   const viewRef = useRef(IDENTITY_VIEW); // zoom
   const replayFrame = useRef(0);
   const toastTimer = useRef(0);
+  const autoOpened = useRef(false); // Tools khud ek baar khul chuke?
   const skeletonRef = useRef(true);
   const inkRef = useRef(true); // Rang On: drawing dikhe aur chale
   const shapesRef = useRef(false);
 
   // UI ki jagah ek baar naap kar yaad rakhte hain (har frame par naapna dheera hota hai).
   // Sab kuch stage ke kone se naapa jata hai, is liye scroll karne se farq nahi padta.
-  const layout = useRef({ width: 1, height: 1, ui: [], controls: [], sliders: [] });
+  // spare = camera ke neeche screen par kitni jagah bachi (phone par tools yahan aate hain).
+  const layout = useRef({ width: 1, height: 1, spare: 0, ui: [], controls: [], sliders: [] });
 
   // Screen par jo dikhana hai: detection ke baad naya target, aur screen ke refresh par naram chalna.
   const display = useRef({ cursors: [], shown: [null, null], skeleton: null, skeletonShown: null });
@@ -184,13 +207,14 @@ export function AirCanvas() {
   const [stats, setStats] = useState({ fps: 0, ms: 0 });
   const [tray, setTray] = useState(false); // chhota stage: panels tray mein
   const [sheetOpen, setSheetOpen] = useState(false); // tray ki sheet khuli hai?
+  const [sheetMax, setSheetMax] = useState(null); // sheet ki zyada se zyada ooncha'i (px)
   const [fullscreen, setFullscreen] = useState(false);
 
   // Tray kahan dikhe:
-  //   phone par = stage ke neeche, screen ki patti par (touch se)
-  //   fullscreen ya chhoti window = stage ke andar (ungli aur touch dono se)
-  const trayInside = tray && (!phone || fullscreen);
-  const trayOutside = tray && phone && !fullscreen;
+  //   phone par = camera ke neeche, screen ki patti par
+  //   chhoti window (computer) = stage ke andar
+  const trayInside = tray && !phone;
+  const trayOutside = tray && phone;
 
   const recorder = useRecorder((ctx) =>
     composeFrame(ctx, {
@@ -222,9 +246,14 @@ export function AirCanvas() {
         .map((el) => ({ el, ...rel(el.getBoundingClientRect()) }))
         .filter((b) => !clip || !clipEl.contains(b.el) || (b.y1 > clip.y0 && b.y0 < clip.y1));
 
+    // Camera ke neeche (aur neeche ki patti ke upar) screen par kitni jagah bachi.
+    const viewportH = window.visualViewport?.height ?? window.innerHeight;
+    const spare = viewportH - s.bottom - QUICK_BAR_PX - 8;
+
     layout.current = {
       width: s.width,
       height: s.height,
+      spare,
       ui: boxes('[data-ui]'),
       controls: boxes('[data-gesture-id]'),
       sliders: boxes('[data-slider]'),
@@ -233,6 +262,10 @@ export function AirCanvas() {
     // Chhota stage: panels tray mein chale jate hain.
     const small = s.width < COMPACT_BELOW;
     setTray((prev) => (prev === small ? prev : small));
+
+    // Sheet ko bachi hui jagah tak hi failne dete hain (kam az kam 40% screen).
+    const max = Math.round(Math.max(spare, viewportH * 0.4));
+    setSheetMax((prev) => (prev === max ? prev : max));
   }
 
   // ctx par zoom laga kar draw karta hai.
@@ -486,14 +519,13 @@ export function AirCanvas() {
       statsRef.current = { start: now, frames: 0, ms: 0 };
     }
 
-    // Haath kabhi kabhi 1 se 2 frames ke liye gum ho jata hai. Pichla haath kuch frames tak
-    // istemal karte hain, taake line na tootay.
+    // Haath kabhi kabhi thodi der ke liye gum ho jata hai. Pichla haath MAX_LOST_MS tak istemal karte hain,
+    // taake line na tootay (fps kam ho tab bhi waqt wahi rehta hai).
     let hand = result.landmarks[0];
     if (hand) {
       lastHand.current = hand;
-      missed.current = 0;
-    } else if (lastHand.current && missed.current < MAX_MISSED) {
-      missed.current += 1;
+      lastSeen.current = now;
+    } else if (lastHand.current && now - lastSeen.current < MAX_LOST_MS) {
       hand = lastHand.current;
     }
 
@@ -521,9 +553,9 @@ export function AirCanvas() {
     d.skeleton = skeletonRef.current ? smoothHand(hand, t, toStage) : null;
 
     // 1) Haath padhna: kitni aur kaun si ungliyan seedhi hain. Phir debounce:
-    //    gesture (ya ungli) tabhi badle jab kai frames tak same rahe.
+    //    gesture (ya ungli) tabhi badle jab kuch der tak same rahe.
     const rawKey = gestureKey(tools.reader.read(hand));
-    const stableKey = tools.stabilizer.update(rawKey);
+    const stableKey = tools.stabilizer.update(rawKey, now);
     if (stableKey !== keyRef.current) changeMode(stableKey, now);
 
     const [stable, fingerList] = stableKey.split('|');
@@ -585,13 +617,15 @@ export function AirCanvas() {
     return () => mq.removeEventListener('change', onChange);
   }, []);
 
-  // Phone par page scroll aur pull-to-refresh band.
+  // Phone par page scroll, pull-to-refresh aur double-tap zoom band.
   useEffect(() => {
     if (!phone) return undefined;
-    const prev = document.body.style.overscrollBehavior;
+    const { overscrollBehavior, touchAction } = document.body.style;
     document.body.style.overscrollBehavior = 'none';
+    document.body.style.touchAction = 'manipulation';
     return () => {
-      document.body.style.overscrollBehavior = prev;
+      document.body.style.overscrollBehavior = overscrollBehavior;
+      document.body.style.touchAction = touchAction;
     };
   }, [phone]);
 
@@ -624,6 +658,16 @@ export function AirCanvas() {
       if (lock) lock.release().catch(() => {});
     };
   }, [status]);
+
+  // Phone par camera ke neeche kaafi jagah bache to Tools khud khul jate hain (ek baar).
+  useEffect(() => {
+    if (status !== 'ready' || !phone || autoOpened.current) return undefined;
+    const id = setTimeout(() => {
+      autoOpened.current = true;
+      if (layout.current.spare >= SHEET_AUTO_OPEN) setSheetOpen(true);
+    }, 500);
+    return () => clearTimeout(id);
+  }, [status, phone]);
 
   // Camera ka asli naap dekhna: shuru mein aur jab phone ghumane se frame badle.
   useEffect(() => {
@@ -770,6 +814,25 @@ export function AirCanvas() {
     setSymmetry(next);
   }
 
+  // Ungli ke peeche chalne ki raftaar: Smooth, Balanced, Fast. Turant lagti hai aur yaad rehti hai.
+  function handleSpeed() {
+    const next = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+    const c = PRESETS[next];
+    tools.pointers.forEach((p) => {
+      p.x.minCutoff = c.minCutoff;
+      p.x.beta = c.beta;
+      p.y.minCutoff = c.minCutoff;
+      p.y.beta = c.beta;
+    });
+    setSpeed(next);
+    try {
+      localStorage.setItem(SPEED_KEY, next);
+    } catch {
+      /* koi baat nahi */
+    }
+    showToast(`Tracking: ${SPEED_LABEL[next]}`);
+  }
+
   function toggleSkeleton() {
     skeletonRef.current = !skeletonRef.current;
     setSkeleton(skeletonRef.current);
@@ -810,12 +873,8 @@ export function AirCanvas() {
         await document.exitFullscreen();
         return;
       }
-      await fullRef.current?.requestFullscreen();
-      try {
-        await screen.orientation.lock('landscape'); // sab browsers mein nahi chalta
-      } catch {
-        /* koi baat nahi */
-      }
+      // Phone par poori app (tray samet), warna sirf stage wala dabba.
+      await (phone ? rootRef.current : fullRef.current)?.requestFullscreen();
     } catch {
       /* browser ne fullscreen se mana kar diya */
     }
@@ -919,11 +978,13 @@ export function AirCanvas() {
       skeleton={skeleton}
       ink={ink}
       shapes={shapes}
+      speed={SPEED_LABEL[speed]}
       hover={hover}
       docked={tray}
       onSkeleton={toggleSkeleton}
       onInk={toggleInk}
       onShapes={toggleShapes}
+      onSpeed={handleSpeed}
     />
   );
   const zoom = (
@@ -955,6 +1016,7 @@ export function AirCanvas() {
   const trayEl = tray ? (
     <MobileTray
       open={sheetOpen}
+      maxHeight={phone ? sheetMax : undefined}
       mode={mode}
       hover={hover}
       canUndo={store.canUndo}
@@ -980,6 +1042,9 @@ export function AirCanvas() {
             <span>{statsText}</span>
             {fullscreenButton}
           </div>
+          {!canFullscreen && (
+            <p>iPhone par poori screen ke liye: Share, phir Add to Home Screen, aur wahan se kholein.</p>
+          )}
           <details>
             <summary className="cursor-pointer text-ink-100">Gesture guide</summary>
             <ul className="mt-2 flex flex-col gap-1.5">
@@ -996,12 +1061,10 @@ export function AirCanvas() {
   ) : null;
 
   // Stage hamesha camera ke frame ke aspect ka: poora frame dikhta hai, kuch katta nahi, zoom nahi lagta.
-  // Phone par jitni jagah screen par bachti hai (neeche ki patti ke upar), usmein fit hota hai.
+  // Phone par ye poori chaurai leta hai aur upar chipka hota hai; neeche ki jagah tools ki.
   const aspect = canvasDims.width / canvasDims.height;
   const availableHeight = phone
-    ? fullscreen
-      ? '100svh'
-      : `(100svh - ${QUICK_BAR} - env(safe-area-inset-bottom))`
+    ? `(100svh - ${QUICK_BAR} - env(safe-area-inset-bottom) - env(safe-area-inset-top))`
     : '(100dvh - 1rem)';
   const stageStyle = {
     width: `min(100%, calc(${availableHeight} * ${aspect}))`,
@@ -1010,18 +1073,38 @@ export function AirCanvas() {
 
   return (
     <div
+      ref={rootRef}
       className={phone ? 'fixed inset-0 h-svh overflow-hidden bg-black' : 'mx-auto max-w-5xl px-3 py-4 sm:px-4 sm:py-6'}
       style={phone ? undefined : { paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
     >
-      {/* Fullscreen mein sirf ye dabba aata hai. Phone par ye neeche ki patti ke upar ki saari jagah leta hai. */}
+      {/* Phone par: poori screen ke liye ek chhota button (iPhone par ye API nahi hoti) */}
+      {phone && canFullscreen && !fullscreen && (
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          className="absolute right-2 z-30 cursor-pointer touch-manipulation rounded-full bg-black/60 px-3 py-1.5 text-xs font-medium text-ink-100"
+          style={{ top: 'max(0.5rem, env(safe-area-inset-top))' }}
+        >
+          ⛶ Full screen
+        </button>
+      )}
+
+      {/* Phone par ye dabba neeche ki patti ke upar ki saari jagah leta hai; camera iske upar chipka hota hai. */}
       <div
         ref={fullRef}
         className={
           phone
-            ? 'absolute inset-x-0 top-0 flex items-center justify-center bg-black'
+            ? 'absolute inset-x-0 top-0 flex items-start justify-center bg-black'
             : 'flex items-center justify-center [&:fullscreen]:bg-black'
         }
-        style={phone ? { bottom: `calc(${QUICK_BAR} + env(safe-area-inset-bottom))` } : undefined}
+        style={
+          phone
+            ? {
+                bottom: `calc(${QUICK_BAR} + env(safe-area-inset-bottom))`,
+                paddingTop: 'env(safe-area-inset-top)',
+              }
+            : undefined
+        }
       >
         <div
           ref={stageRef}
@@ -1059,7 +1142,7 @@ export function AirCanvas() {
           <SymmetryGuides mode={symmetry} view={view} />
 
           {tray ? (
-            // Chhota stage: tray stage ke andar sirf tab, jab wo neeche nahi ja sakti (fullscreen ya chhoti window)
+            // Chhota stage: tray stage ke andar sirf computer ki chhoti window mein. Phone par wo bahar hai.
             trayInside && trayEl
           ) : (
             // Bara stage (desktop ya tablet): panels stage ke andar tairte hain, ungli se control
@@ -1102,7 +1185,7 @@ export function AirCanvas() {
         </div>
       </div>
 
-      {/* Phone par tray screen ke neeche chipki hoti hai (stage ke bahar) */}
+      {/* Phone par tray screen ke neeche chipki hoti hai (camera ke bahar) */}
       {trayOutside && trayEl}
 
       {/* Phone par ye sab Tools sheet ke andar hai. Baaqi jagah stage ke neeche. */}

@@ -10,10 +10,11 @@ const MODEL_URL =
 const CAMERA_LONG = 960;
 const CAMERA_SHORT = 540;
 
-// Phone ka camera: 4:3 (portrait mein 3:4). Ye sensor ka poora frame hota hai, is liye
-// zoom nahi lagta aur sab se chaura angle milta hai. (9:16 maangne par kuch phones crop kar dete hain.)
-const PHONE_LONG = 960;
-const PHONE_SHORT = 720;
+// Phone ka camera: 4:3 (portrait mein 3:4), VGA. Ye sensor ka poora frame hota hai, is liye zoom nahi
+// lagta aur sab se chaura angle milta hai. Chhota frame hone se phone par detection tez chalti hai.
+// Behtar tasveer chahiye to 960 aur 720 karein.
+const PHONE_LONG = 640;
+const PHONE_SHORT = 480;
 
 function cameraSize() {
   const phone = window.matchMedia('(pointer: coarse)').matches;

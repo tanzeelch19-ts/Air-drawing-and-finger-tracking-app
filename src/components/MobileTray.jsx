@@ -43,10 +43,11 @@ function TrayButton({ id, hover, tone = 'default', disabled, onClick, children }
 }
 
 // Chhoti screen (phone) ke liye: neeche ek patti (hamesha dikhti hai) aur uske upar ek sheet (Tools dabane par).
-// Ye stage ke andar hai, is liye ungli se bhi chalta hai (0.7 second rukein), aur touch se bhi.
 // children = sheet ke andar ka sab kuch (rang, toggles, zoom, filters...)
+// maxHeight = sheet kitni ooncha ho sakti hai (pixels). Phone par ye camera ke neeche ki bachi jagah hai.
 export function MobileTray({
   open,
+  maxHeight,
   mode,
   hover,
   canUndo,
@@ -71,7 +72,8 @@ export function MobileTray({
           data-ui
           data-clip
           onScroll={onLayout}
-          className="mx-2 mb-2 flex max-h-[62svh] flex-col gap-3 overflow-y-auto overscroll-contain rounded-2xl bg-black/80 p-2"
+          style={{ maxHeight: maxHeight ?? '62svh' }}
+          className="mx-2 mb-2 flex flex-col gap-3 overflow-y-auto overscroll-contain rounded-2xl bg-black/80 p-2"
         >
           {children}
         </div>
