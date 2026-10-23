@@ -8,6 +8,7 @@ import { OneEuroFilter } from '@/lib/oneEuro';
 import { createGestureStabilizer } from '@/lib/stabilizer';
 import {
   drawPiece,
+  drawStroke,
   drawTail,
   renderAll,
   setCanvasSize,
@@ -59,6 +60,16 @@ function initialSpeed() {
   return TOUCH ? 'fast' : 'balanced'; // phone par pehle se tez
 }
 
+// Shapes: Off = band, Auto = line khatam hote hi, Hold = ungli ruk kar rakhne par (live preview).
+const SHAPE_MODES = ['off', 'auto', 'hold'];
+const SHAPE_MODE_LABEL = { off: 'Off', auto: 'Auto', hold: 'Hold' };
+const SHAPE_MODE_HINT = {
+  off: 'Shapes Off',
+  auto: 'Shapes Auto: line khatam hote hi perfect',
+  hold: 'Shapes Hold: line banate hue ungli ruk kar rakhein',
+};
+const HOLD_MS = 450; // Hold mein itni der ungli ruke to shape dikhti hai
+
 const PHONE_QUERY = '(max-width: 639px)'; // is se patli screen = phone
 const QUICK_BAR = '3.75rem'; // phone par neeche ki patti ki ooncha'i
 const QUICK_BAR_PX = 60;
@@ -89,9 +100,18 @@ const SHAPE_LABEL = {
   circle: 'Circle',
   ellipse: 'Ellipse',
   triangle: 'Triangle',
+  equilateral: 'Barabar triangle',
+  'right-triangle': 'Seedhe kone ka triangle',
   square: 'Square',
   rectangle: 'Rectangle',
+  diamond: 'Diamond',
   quad: 'Chaar kone',
+  pentagon: 'Pentagon',
+  hexagon: 'Hexagon',
+  heptagon: 'Heptagon',
+  octagon: 'Octagon',
+  polygon: 'Polygon',
+  star: 'Star',
 };
 
 const GUIDE = [
@@ -101,7 +121,17 @@ const GUIDE = [
   { icon: '🖐️', title: 'Khuli hatheli', text: '(chaaron ungliyan): eraser' },
   { icon: '👌', title: 'Pinch', text: '(baaqi teen ungliyan upar): faasla = brush size' },
   { icon: '✊', title: 'Muthi ya teen ungliyan', text: 'ruk jao' },
-  { icon: '🔷', title: 'Shapes On', text: 'gola, square, triangle, seedhi line perfect ho jati hai' },
+  {
+    icon: '🔷',
+    title: 'Shapes Auto',
+    text: 'line khatam hote hi gola, triangle, square, pentagon, hexagon, star wagaira perfect ho jati hai',
+  },
+  {
+    icon: '⏸️',
+    title: 'Shapes Hold',
+    text: 'line banate hue ungli ruk kar rakhein: shape live dikhti hai. Hilayein to wapas kachchi line',
+  },
+  { icon: '🎨', title: 'Fill', text: 'On ho to band shapes halke rang se bhar jati hain' },
   { icon: '🦴', title: 'Skeleton aur Rang', text: 'Rang Off karein to sirf haath dikhta hai' },
   { icon: '⚡', title: 'Speed', text: 'Smooth, Balanced ya Fast: ungli ke peeche chalne ki raftaar' },
   { icon: '🔍', title: 'Zoom', text: 'slider par ungli phirayein to zoom, minimap par phirayein to hissa badalta hai' },
@@ -180,7 +210,14 @@ export function AirCanvas() {
   const autoOpened = useRef(false); // Tools khud ek baar khul chuke?
   const skeletonRef = useRef(true);
   const inkRef = useRef(true); // Rang On: drawing dikhe aur chale
-  const shapesRef = useRef(false);
+
+  // Shapes
+  const shapeModeRef = useRef('off');
+  const fillRef = useRef(false);
+  const lastMoveAt = useRef(0); // line mein aakhri naya point kab laga
+  const previewing = useRef(false); // abhi perfect shape dikh rahi hai?
+  const previewTried = useRef(false); // is ruk mein pehchan ki koshish ho chuki?
+  const previews = useRef([]); // har ungli (slot) ki dikhayi gayi shape
 
   // UI ki jagah ek baar naap kar yaad rakhte hain (har frame par naapna dheera hota hai).
   // Sab kuch stage ke kone se naapa jata hai, is liye scroll karne se farq nahi padta.
@@ -202,7 +239,8 @@ export function AirCanvas() {
   const [view, setView] = useState(IDENTITY_VIEW);
   const [skeleton, setSkeleton] = useState(true);
   const [ink, setInk] = useState(true);
-  const [shapes, setShapes] = useState(false);
+  const [shapeMode, setShapeMode] = useState('off');
+  const [fill, setFill] = useState(false);
   const [toast, setToast] = useState(null);
   const [stats, setStats] = useState({ fps: 0, ms: 0 });
   const [tray, setTray] = useState(false); // chhota stage: panels tray mein
@@ -327,6 +365,59 @@ export function AirCanvas() {
     setCanvasDims(next);
   }
 
+  // ---------- shapes: live preview ----------
+  // Poori drawing dobara banata hai, aur chalti hui lines ko (preview ho to uski perfect shape ke roop mein) upar.
+  function redrawLive(ctx) {
+    renderAll(ctx, store.getStrokes(), viewRef.current);
+    inView(ctx, () => {
+      [0, 1].forEach((slot) => {
+        const stroke = store.active(slot);
+        if (!stroke) return;
+        const shape = previews.current[slot];
+        drawStroke(
+          ctx,
+          shape
+            ? { ...stroke, points: shape.points, sharp: shape.sharp, fill: fillRef.current && shape.closed }
+            : stroke,
+        );
+      });
+    });
+  }
+
+  // Ungli hili: perfect shape hata kar kachchi line wapas.
+  function cancelPreview(ctx) {
+    previewing.current = false;
+    previews.current = [];
+    redrawLive(ctx);
+  }
+
+  // Ungli kuch der ruki rahi: dekhte hain koi shape banti hai? Banti ho to usi waqt dikha dete hain.
+  function maybePreview(ctx, now) {
+    if (shapeModeRef.current === 'off' || previewing.current || previewTried.current) return;
+    if (!lastMoveAt.current || now - lastMoveAt.current < HOLD_MS) return;
+
+    previewTried.current = true; // is ruk mein dobara koshish nahi
+
+    const found = [];
+    let first = null;
+    [0, 1].forEach((slot) => {
+      const stroke = store.active(slot);
+      if (!stroke || stroke.kind !== 'pen') return;
+      const shape = recognizeShape(stroke.points, viewRef.current.scale);
+      if (shape) {
+        found[slot] = shape;
+        first = first ?? shape;
+      }
+    });
+    if (!first) return;
+
+    previews.current = found;
+    previewing.current = true;
+    redrawLive(ctx);
+    navigator.vibrate?.(10);
+    showToast(SHAPE_LABEL[first.type]);
+  }
+
   // ---------- mode badalna ----------
   function resetTracking() {
     tools.pointers.forEach(resetPointer);
@@ -335,23 +426,35 @@ export function AirCanvas() {
     liveSize.current = sizeRef.current;
   }
 
-  // Chalti hui saari strokes khatam karta hai. Shapes On ho to unhein perfect shape bana deta hai.
+  // Chalti hui saari strokes khatam karta hai.
+  // Auto: koi shape pehchani jaye to wo lagti hai. Hold: sirf wahi jo ruk kar dikhayi gayi thi.
   function endStroke() {
     const live = store.actives();
     if (!live.length) return;
 
+    const shapeMode = shapeModeRef.current;
     let snapped = null;
-    if (shapesRef.current) {
-      for (const stroke of live) {
-        if (stroke.kind !== 'pen') continue;
-        const shape = recognizeShape(stroke.points, viewRef.current.scale);
-        if (shape) {
-          stroke.points = shape.points;
-          stroke.sharp = shape.sharp;
-          snapped = shape.type;
-        }
-      }
+
+    if (shapeMode !== 'off') {
+      [0, 1].forEach((slot) => {
+        const stroke = store.active(slot);
+        if (!stroke || stroke.kind !== 'pen') return;
+
+        const shape =
+          previews.current[slot] ??
+          (shapeMode === 'auto' ? recognizeShape(stroke.points, viewRef.current.scale) : null);
+        if (!shape) return;
+
+        stroke.points = shape.points;
+        stroke.sharp = shape.sharp;
+        stroke.fill = fillRef.current && shape.closed; // band shape ho aur Fill On ho to bhari hui
+        snapped = shape.type;
+      });
     }
+
+    previews.current = [];
+    previewing.current = false;
+    previewTried.current = false;
 
     const ctx = getCtx();
     if (!snapped && ctx) inView(ctx, () => live.forEach((stroke) => drawTail(ctx, stroke)));
@@ -378,9 +481,11 @@ export function AirCanvas() {
 
   // ---------- drawing ----------
   // points = har seedhi ungli ka ek point (stage ke hisaab se, 0 se 1). 'double' mein do points = do lines.
+  // Wapas deta hai: kya line mein kuch naya laga (shuruaat ya naya point)?
   function paint(ctx, kind, points) {
     const v = viewRef.current;
     const erasing = kind === 'erase';
+    let moved = false;
 
     points.forEach((point, slot) => {
       // Screen ka point -> drawing ka point (zoom ke hisaab se)
@@ -401,15 +506,20 @@ export function AirCanvas() {
           },
           target,
         );
+        moved = true;
         return;
       }
 
       const last = stroke.points[stroke.points.length - 1];
       if (Math.hypot(target.x - last.x, target.y - last.y) < MIN_STEP / v.scale) return;
 
+      if (previewing.current) cancelPreview(ctx); // ungli hili: kachchi line wapas, aage draw jaari
       store.extend(slot, target);
       inView(ctx, () => drawPiece(ctx, stroke)); // sirf naya tukda
+      moved = true;
     });
+
+    return moved;
   }
 
   // ---------- pinch se brush size ----------
@@ -591,7 +701,14 @@ export function AirCanvas() {
     //    Gesture ek do frame flicker kare to line sirf ruk jati hai, tootti nahi.
     const drawing = stable === 'draw' || stable === 'double' || stable === 'erase';
     if (drawing && inkRef.current && !overUi && now >= lockUntil.current) {
-      if (rawKey === stableKey) paint(ctx, stable, points);
+      if (rawKey === stableKey) {
+        if (paint(ctx, stable, points)) {
+          lastMoveAt.current = now;
+          previewTried.current = false;
+        } else {
+          maybePreview(ctx, now); // ungli ruki hui hai: shape ban rahi hai?
+        }
+      }
     } else {
       endStroke();
     }
@@ -844,9 +961,22 @@ export function AirCanvas() {
     if (!inkRef.current) endStroke();
   }
 
-  function toggleShapes() {
-    shapesRef.current = !shapesRef.current;
-    setShapes(shapesRef.current);
+  // Shapes: Off, Auto, Hold
+  function cycleShapes() {
+    const next = SHAPE_MODES[(SHAPE_MODES.indexOf(shapeModeRef.current) + 1) % SHAPE_MODES.length];
+    shapeModeRef.current = next;
+    setShapeMode(next);
+
+    if (next === 'off' && previewing.current) {
+      const ctx = getCtx();
+      if (ctx) cancelPreview(ctx);
+    }
+    showToast(SHAPE_MODE_HINT[next]);
+  }
+
+  function toggleFill() {
+    fillRef.current = !fillRef.current;
+    setFill(fillRef.current);
   }
 
   function handleUndo() {
@@ -935,12 +1065,12 @@ export function AirCanvas() {
   );
 
   // ---------- cursor ka look ----------
-  const fill = color === RAINBOW ? RAINBOW_GRADIENT : color;
+  const fillColor = color === RAINBOW ? RAINBOW_GRADIENT : color;
   const glow = color === RAINBOW ? '#ffffff' : color;
   const CURSOR_STYLE = {
-    draw: { background: fill, boxShadow: `0 0 18px ${glow}` },
-    double: { background: fill, boxShadow: `0 0 18px ${glow}` },
-    size: { background: fill, boxShadow: '0 0 0 3px #ffffff' },
+    draw: { background: fillColor, boxShadow: `0 0 18px ${glow}` },
+    double: { background: fillColor, boxShadow: `0 0 18px ${glow}` },
+    size: { background: fillColor, boxShadow: '0 0 0 3px #ffffff' },
     erase: { background: 'rgba(255,255,255,0.15)', boxShadow: '0 0 0 3px #ffffff' },
     select: { background: 'transparent', boxShadow: '0 0 0 3px #ffffff' },
     idle: { background: 'rgba(255,255,255,0.35)', boxShadow: 'none' },
@@ -977,13 +1107,15 @@ export function AirCanvas() {
     <ModePanel
       skeleton={skeleton}
       ink={ink}
-      shapes={shapes}
+      shapes={SHAPE_MODE_LABEL[shapeMode]}
+      fill={fill}
       speed={SPEED_LABEL[speed]}
       hover={hover}
       docked={tray}
       onSkeleton={toggleSkeleton}
       onInk={toggleInk}
-      onShapes={toggleShapes}
+      onShapes={cycleShapes}
+      onFill={toggleFill}
       onSpeed={handleSpeed}
     />
   );
@@ -1158,7 +1290,7 @@ export function AirCanvas() {
 
           {toast && (
             <div
-              className="pointer-events-none absolute left-1/2 z-20 -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-sm text-ink-100 @max-3xl:text-xs"
+              className="pointer-events-none absolute left-1/2 z-20 max-w-[90%] -translate-x-1/2 rounded-full bg-black/70 px-4 py-2 text-center text-sm text-ink-100 @max-3xl:text-xs"
               style={{ bottom: trayInside ? '5.5rem' : phone ? '1rem' : '6rem' }}
             >
               {toast}

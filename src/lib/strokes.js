@@ -25,6 +25,7 @@ export function sizeForAspect(aspect) {
 export const IDENTITY_VIEW = { scale: 1, x: 0, y: 0 };
 
 const TAU = Math.PI * 2;
+const FILL_ALPHA = 0.3; // bhari hui shape ka rang kitna gehra ho
 
 // Har stroke ki kitni copies banengi (rotate ya flip ke saath).
 const SYMMETRY_TRANSFORMS = {
@@ -41,6 +42,19 @@ const SYMMETRY_TRANSFORMS = {
 };
 
 const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+
+// '#rrggbb' ko halke rang (rgba) mein badalta hai
+function withAlpha(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+function fillStyleFor(stroke) {
+  if (!stroke.fill) return null;
+  return stroke.color === RAINBOW
+    ? `hsla(${stroke.hue % 360}, 100%, 60%, ${FILL_ALPHA})`
+    : withAlpha(stroke.color, FILL_ALPHA);
+}
 
 // Line ko tukdon (pieces) mein baantte hain.
 // Aam line: har tukda gol (curve) hota hai.
@@ -85,6 +99,7 @@ function trace(ctx, piece, moveFirst) {
 function paintPieces(ctx, stroke, pieces) {
   if (!pieces.length) return;
   const rainbow = stroke.color === RAINBOW;
+  const fillStyle = fillStyleFor(stroke);
 
   // Symmetry ka markaz drawing ke beech mein hai (naap badalne par ye bhi badalta hai).
   const cx = WIDTH / 2;
@@ -102,6 +117,15 @@ function paintPieces(ctx, stroke, pieces) {
     ctx.rotate(angle);
     if (flip) ctx.scale(-1, 1);
     ctx.translate(-cx, -cy);
+
+    // Band shape ho aur fill On ho: pehle halka rang, phir uske upar kinara.
+    if (fillStyle) {
+      ctx.beginPath();
+      pieces.forEach((piece, i) => trace(ctx, piece, i === 0));
+      ctx.closePath();
+      ctx.fillStyle = fillStyle;
+      ctx.fill();
+    }
 
     if (rainbow) {
       // Har tukde ka apna rang: tukde ke number se hue nikalta hai.
@@ -124,7 +148,7 @@ function paintPieces(ctx, stroke, pieces) {
   ctx.restore();
 }
 
-// stroke = { kind: 'pen' | 'eraser' | 'clear', color, size, sym, hue, sharp, points: [{x, y}] }
+// stroke = { kind: 'pen' | 'eraser' | 'clear', color, size, sym, hue, sharp, fill, points: [{x, y}] }
 // Ye saare functions maan kar chalte hain ke ctx par zoom (view) pehle se laga hua hai.
 
 // Poori stroke (replay ke liye: undo, redo, clear, zoom ke baad)
